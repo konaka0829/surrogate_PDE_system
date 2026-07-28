@@ -64,6 +64,32 @@ GRF archive, and validation binding all use the same configured `L`. The
 constant-mode and `(-1)^m` half-domain-shift conventions are independent of
 `L`; the latter represents a physical shift by `L / 2`.
 
+## Burgers split-step real-grid contract
+
+The split-step Fourier kernel requires the real collocation length `nx`
+explicitly wherever an RFFT coefficient tensor is interpreted. State
+coefficients, wavenumbers, and a supplied dealias mask must each have final
+length `nx // 2 + 1`; forcing coefficients must have exactly the state
+coefficient shape. Every inverse RFFT uses `n=nx`. The two-thirds policy
+continues to retain mode indices through `nx // 3`.
+
+Before Phase 2-01, this kernel inferred the inverse-transform length as
+`2 * (rfft_width - 1)`, which silently assumes an even grid. Since both
+`nx=14` and `nx=15` have RFFT width 8, an odd-grid state was transformed on a
+different real grid. Phase 2-01 removes that inference. Independent float64
+tests cover direct conservative nonlinear terms and short trajectories on
+`nx=15,16`, with dealiasing disabled and enabled. Exact hashes preserve the
+pre-correction even-grid nonlinear and trajectory outputs.
+
+ETDRK4 was not changed: focused parity tests confirm that its real-space
+nonlinear inputs and Fourier coefficient lengths remain consistent on odd and
+even grids, and that short trajectories preserve shape and finiteness.
+
+This correction does not complete Phase 2. Target-specific heat convergence,
+production-grade Burgers convergence, cross-solver comparison,
+reaction-diffusion convergence, and reference-field metric quadrature
+convergence remain future tasks.
+
 ## Repository layout
 
 ```text
@@ -385,10 +411,11 @@ identity/certificate use `v5`, and the validation foundation contract uses
 foundation master binding and dataset binding proof remain at `v3`, and
 feature-state identity/archive/metadata remain at `v2`. Earlier study runs and
 validation certificates are rejected rather than treated as carrying complete
-fixed-decoder diagnostics. Package version `0.2.5` and numerical-environment
-schema `pol-numerical-environment-v2` separate new content identities from
-older cached results. The earlier binding and CPU-only semantics remain
-intact.
+fixed-decoder diagnostics. Package version `0.2.6` is recorded by numerical-
+environment schema `pol-numerical-environment-v2`; therefore pre-Phase-2-01
+version `0.2.5` numerical artifacts cannot share identities with results after
+the split-step odd-grid correction. Artifact structural schemas are unchanged.
+The earlier binding and CPU-only semantics remain intact.
 
 ## Included profiles
 
@@ -418,17 +445,19 @@ not run by the test suite.
 pytest -q
 ```
 
-The suite covers Fourier and Nyquist behavior, GRF physical-domain covariance
-scaling on odd and even grids, unit-domain and P0-04 CPU deterministic
-regressions, finite-input information isolation, strict CPU-only configuration,
-CPU tensor invariants at artifact boundaries, execution-policy tamper
-detection, dimension independence, fixed and learned readouts, artifact tamper
-detection, fixed-decoder observable bandwidth and exact zero-fill regression,
-learned `J -> q` readouts with `q > J`, decoder-diagnostic binding/tamper
-detection, foundation validation, dataset splitting, unified scalar/sweep
-planning, selection freezing, test-order enforcement, plot regeneration, CLI
-behavior, and the absence of publication-number namespaces from the core
-package.
+The suite covers Fourier and Nyquist behavior; split-step RFFT-width
+ambiguity, explicit-`nx` validation, odd/even nonlinear and short-trajectory
+references, exact even-grid preservation, and ETDRK4 parity; GRF
+physical-domain covariance scaling on odd and even grids; unit-domain and
+P0-04 CPU deterministic regressions; finite-input information isolation;
+strict CPU-only configuration; CPU tensor invariants at artifact boundaries;
+execution-policy tamper detection; dimension independence; fixed and learned
+readouts; artifact tamper detection; fixed-decoder observable bandwidth and
+exact zero-fill regression; learned `J -> q` readouts with `q > J`;
+decoder-diagnostic binding/tamper detection; foundation validation; dataset
+splitting; unified scalar/sweep planning; selection freezing; test-order
+enforcement; plot regeneration; CLI behavior; and the absence of
+publication-number namespaces from the core package.
 
 For a complete local smoke sequence:
 

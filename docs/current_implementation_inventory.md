@@ -1,6 +1,6 @@
 # Current implementation inventory
 
-This inventory describes the code present at Phase P0-05. It is a
+This inventory describes the code present through Phase 2-01. It is a
 characterization of the current implementation, not a claim that every
 implemented behavior is scientifically final.
 
@@ -115,6 +115,24 @@ Registered systems are:
 | `burgers` | split-step/semi-implicit alias and Fourier pseudospectral ETDRK4/`etdrk4` alias |
 | `reaction_diffusion` | semi-implicit spectral Euler with optional two-thirds nonlinear filtering |
 
+The Burgers split-step kernel now has an explicit real-grid-length contract.
+Its Fourier nonlinear and outer-step helpers require `nx`, verify that state,
+wavenumber, and any supplied dealias mask all have RFFT width
+`nx // 2 + 1`, and reject a forcing coefficient tensor whose shape differs
+from the state coefficients. Every inverse RFFT receives `n=nx`; no helper
+recovers a real-grid length from the coefficient width.
+
+Before Phase 2-01, the split-step nonlinear helper used
+`2 * (rfft_width - 1)` as the inverse-transform length. That expression is
+correct for even grids but maps, for example, an `nx=15` field with width 8
+onto a length-14 grid. Phase 2-01 corrects odd-grid nonlinear and trajectory
+semantics while preserving the exact checked deterministic outputs for
+`nx=16`, both with and without the current two-thirds filter. Independent
+float64 tests directly write the explicit-`nx` conservative nonlinearity and
+each heat/nonlinear/Euler/filter substep for `nx=15,16`. Focused ETDRK4 parity
+tests pass without an ETDRK4 implementation change because that solver already
+uses the real-field length in every inverse RFFT.
+
 Feature-generator kinds are `pde_dynamics` and `static_input`. The static
 baseline uses the same finite-input, cache, observation, readout, and
 evaluation path, although no standalone checked-in study JSON currently
@@ -221,17 +239,21 @@ results and do not receive placeholder seed uncertainty.
   foundation/master bindings and dataset binding proofs use `v3`, and
   feature-state identity/archive/metadata use `v2`.
 - Numerical-environment schema `pol-numerical-environment-v2` and package
-  version `0.2.5` join these artifact revisions in preventing pre-P0-05 runs
-  and validation certificates from being interpreted as decoder-diagnostic
-  complete. The earlier sampler, domain, CPU, target-reference binding, and
-  frozen-test proof semantics remain content-hash inputs.
+  version `0.2.6` are content-hash inputs. The version change prevents
+  pre-Phase-2-01 numerical artifacts, including version `0.2.5` artifacts,
+  from sharing an identity with results computed after the odd-grid
+  correction. No validation, dataset, study, or artifact structural schema was
+  changed. The earlier sampler, domain, CPU, target-reference binding,
+  decoder-diagnostic, and frozen-test proof semantics remain content-hash
+  inputs.
 - Plot-only regeneration requires an existing verified run and is
   transactional.
 
-## P0-00 characterization baseline and P0-01--P0-05 extensions
+## Characterization and correction coverage through Phase 2-01
 
-The following small deterministic tests fix the behaviors requested for this
-phase. No solver or metric implementation was changed to establish them.
+The P0 rows below characterize or extend the previously established contracts.
+The final row records the focused Phase 2-01 scientific correction and its
+numerical-preservation evidence; no metric implementation was changed.
 
 | Contract | Characterization coverage |
 |---|---|
@@ -250,14 +272,19 @@ phase. No solver or metric implementation was changed to establish them.
 | P0-05 fixed-decoder bandwidth formulas and numerical preservation | parameterized odd/even and below/equal/above-bandwidth tests in `tests/test_learning.py`, including invalid-input rejection, observable-prefix recovery, exact suffix zeros, and exact equality with the pre-diagnostic tensor construction |
 | P0-05 decoder artifact binding and tamper rejection | `tests/test_study.py::test_direct_decoder_diagnostic_is_bound_across_study_artifacts`, diagnostic-tamper cases, and the frozen-mismatch pre-test guard |
 | P0-05 `J x q` independence and foundation characterization | `tests/test_study.py::test_checked_in_observation_output_plan_keeps_q_greater_than_J_cells` and `tests/test_validation_data.py::test_foundation_validation_publishes_passing_certificate` |
+| Phase 2-01 split-step real-grid length and parity | `tests/test_numerics.py`, covering RFFT-width ambiguity, required explicit `nx`, independent nonlinear and short-trajectory references for `nx=15,16` with filtering off/on, exact even-grid pre-correction hashes, spectral/mask/forcing mismatch rejection, and ETDRK4 parity characterization |
 
-## Missing or incomplete after P0-05
+## Missing or incomplete after Phase 2-01
 
 The following are not implemented or are incomplete; they are not repaired in
-this phase:
+this task:
 
 - heat profiles have no target-specific convergence certificate and therefore
   remain explicitly `foundation_only`;
+- Burgers still needs a production-grade spatial and temporal convergence
+  study and a separately interpreted cross-solver comparison;
+- reaction-diffusion convergence remains unvalidated;
+- reference-field metric quadrature convergence remains unvalidated;
 - end-to-end CUDA/GPU execution, GPU artifact provenance, CPU/GPU numerical
   equivalence, mixed precision, and distributed execution are not implemented;
 - the fixed decoder still uses structural zero-fill outside the directly

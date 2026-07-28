@@ -1,4 +1,4 @@
-# Known scientific risks at Phase P0-05
+# Known scientific risks through Phase 2-01
 
 Status terms in this document have strict meanings:
 
@@ -221,6 +221,48 @@ the result row now states why. The general trial schema continues to permit
 `q > J`: Model 2/3 learn `q` outputs from `J` features, so neither `q <= J` nor
 `n_tar <= J` is a valid general interface constraint.
 
+## R6. Burgers split-step inferred an even real-grid length from RFFT width
+
+**Status: resolved in Phase 2-01 for the split-step kernel.**
+
+Earlier behavior:
+
+`pol/numerics/burgers.py::burgers_nonlinear_hat` and the implicit-mask path
+reconstructed the real-grid length as `2 * (u_hat.shape[-1] - 1)`. An RFFT
+width does not determine parity: width `m` can represent either
+`nx=2*(m-1)` or `nx=2*m-1`. Consequently an odd `nx=15` state of width 8 was
+inverse transformed with `n=14`, so its conservative nonlinear term and
+subsequent trajectory were computed on the wrong collocation grid. Existing
+odd/even tests covered only shape, finiteness, and determinism and therefore
+did not expose the numerical error.
+
+Phase 2-01 resolution:
+
+- the split-step nonlinear and outer-step APIs require explicit keyword-only
+  `nx`, and every inverse RFFT uses that length;
+- state coefficients, wavenumbers, and any supplied dealias mask must have
+  width `nx // 2 + 1`; forcing coefficients must exactly match the state
+  coefficient shape;
+- implicit masks are built from explicit `nx`, retaining the existing
+  `mode_index <= nx // 3` policy;
+- independent float64 references verify the conservative nonlinear term and
+  every substep of short `nx=15,16` trajectories with dealiasing off and on;
+- exact tensor hashes verify that the pre-correction `nx=16` nonlinear term
+  and short trajectory are unchanged in both filter modes;
+- ETDRK4 odd/even nonlinear-length and finite-trajectory characterization
+  passes. Its implementation was not changed because it already supplies the
+  real-field length to its inverse RFFTs.
+
+Package version `0.2.6` enters the existing numerical-environment fingerprint,
+so artifacts computed with version `0.2.5` cannot reuse the same
+content-addressed numerical identity. Structural artifact schemas were not
+changed.
+
+**Residual caveat:** this correction establishes local odd/even consistency;
+it does not complete Phase 2. Target-specific heat convergence, full Burgers
+convergence, cross-solver comparison, reaction-diffusion convergence, and
+reference-field metric quadrature convergence remain separate work.
+
 ## Items not yet verified
 
 - The authoritative historical mapping from E0--E7 or Figure numbers to the
@@ -228,4 +270,9 @@ the result row now states why. The general trial schema continues to permit
 - No main profile was run in P0-05. The fixed-decoder artifact contract is
   established with focused tests, foundation smoke validation, and checked-in
   smoke studies rather than new production-resolution results.
-- This inventory does not establish cross-device numerical equivalence.
+- No main profile was run in Phase 2-01. Its numerical correction is checked
+  by focused unit/reference regressions and the checked-in smoke workflow.
+- Target-specific heat convergence, full Burgers convergence, cross-solver
+  comparison, reaction-diffusion convergence, and reference-field metric
+  quadrature convergence are not established by Phase 2-01.
+- This work does not establish cross-device numerical equivalence.

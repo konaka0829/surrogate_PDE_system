@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 import torch
 
+from pol import __version__
 from pol.config.loader import (
     load_dataset_spec,
     load_study_spec,
@@ -115,10 +116,16 @@ def test_device_resolution_never_consults_cuda_availability(
 def test_environment_fingerprint_separates_policy_from_cuda_build_metadata() -> None:
     fingerprint = numerical_environment_fingerprint()
     assert fingerprint["schema_version"] == "pol-numerical-environment-v2"
+    assert __version__ == "0.2.6"
+    assert fingerprint["pol_version"] == __version__
     assert {
         key: fingerprint[key] for key in execution_device_policy()
     } == execution_device_policy()
     assert "torch_cuda_version" in fingerprint
+
+    pre_correction = dict(fingerprint)
+    pre_correction["pol_version"] = "0.2.5"
+    assert stable_object_hash(pre_correction) != stable_object_hash(fingerprint)
 
 
 def test_cpu_policy_is_published_and_verified_across_artifacts(
