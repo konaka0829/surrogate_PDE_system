@@ -19,7 +19,11 @@ from pol.runtime.artifacts import manifest_records
 from pol.runtime.hashing import stable_object_hash
 from pol.runtime.io import atomic_torch_save, write_strict_json
 from pol.study.runner import run_study, verify_study_run
-from pol.validation.binding import DatasetBindingError, evaluate_dataset_binding
+from pol.validation.binding import (
+    DatasetBindingError,
+    evaluate_dataset_binding,
+    verify_binding_proof,
+)
 from pol.validation.runner import ensure_validation, load_validation_certificate
 from tests.helpers import write_json, write_tiny_stack
 
@@ -115,6 +119,11 @@ def test_certificate_records_self_consistent_selected_suffix_contract(
     master = certificate["foundation_contract"]["master_initial_conditions"]
     assert set(master["tensor_hashes"]) == {"sample_ids", "values", "fourier"}
     assert len(master["archive_identity_hash"]) == 64
+    assert certificate["foundation_contract"]["domain_length"] == (
+        certificate["foundation_contract"]["grf_sampler_domain_length"]
+        == master["domain_length"]
+        == master["metadata"]["domain_length"]
+    )
 
 
 def test_validated_reference_accepts_only_an_actual_finer_suffix_member(
@@ -305,7 +314,7 @@ def test_load_dataset_rejects_legacy_archive_revision(tmp_path: Path) -> None:
     )
     archive_path = dataset.path / "dataset.pt"
     archive = torch.load(archive_path, map_location="cpu", weights_only=True)
-    archive["schema_version"] = "pol-reference-dataset-v1"
+    archive["schema_version"] = "pol-reference-dataset-v2"
     atomic_torch_save(archive_path, archive)
     _refresh_artifact_record(dataset.path, "dataset.pt")
     with pytest.raises(ValueError, match="unsupported dataset archive schema"):
@@ -347,6 +356,31 @@ def test_binding_proof_changes_dataset_artifact_identity(tmp_path: Path) -> None
     assert first.artifact_id != second.artifact_id
 
 
+@pytest.mark.parametrize("binding_kind", ["validated_reference", "foundation_only"])
+def test_binding_proof_rejects_grf_sampler_domain_mismatch(
+    tmp_path: Path,
+    binding_kind: str,
+) -> None:
+    if binding_kind == "validated_reference":
+        certificate, validation_spec, dataset_spec = _binding_inputs(tmp_path)
+    else:
+        validation_path, dataset_path, _ = write_tiny_stack(tmp_path)
+        validation_spec = load_validation_spec(
+            validation_path, repo_root=tmp_path
+        )
+        certificate = ensure_validation(validation_spec).certificate
+        dataset_spec = load_dataset_spec(dataset_path, repo_root=tmp_path)
+    proof = evaluate_dataset_binding(certificate, validation_spec, dataset_spec)
+    changed = copy.deepcopy(proof)
+    changed["grf_sampler_domain_length"] = 2.0
+    unsigned = {
+        key: value for key, value in changed.items() if key != "proof_hash"
+    }
+    changed["proof_hash"] = stable_object_hash(unsigned)
+    with pytest.raises(ValueError, match="GRF sampler domain mismatch"):
+        verify_binding_proof(changed)
+
+
 def test_certificate_loader_rejects_allowed_suffix_tamper(tmp_path: Path) -> None:
     validation_path, _, _ = write_tiny_stack(tmp_path)
     outcome = ensure_validation(
@@ -360,4 +394,38 @@ def test_certificate_loader_rejects_allowed_suffix_tamper(tmp_path: Path) -> Non
     write_strict_json(certificate_path, certificate)
     _refresh_artifact_record(outcome.reference.path, "certificate.json")
     with pytest.raises(ValueError, match="certificate contract"):
+        load_validation_certificate(outcome.reference.path)
+
+
+def test_certificate_loader_rejects_master_sampler_domain_tamper(
+    tmp_path: Path,
+) -> None:
+    validation_path, _, _ = write_tiny_stack(tmp_path)
+    outcome = ensure_validation(
+        load_validation_spec(validation_path, repo_root=tmp_path)
+    )
+    master_path = outcome.reference.path / "master_initial_conditions.pt"
+    master = torch.load(master_path, map_location="cpu", weights_only=True)
+    master["metadata"]["domain_length"] = 2.0
+    atomic_torch_save(master_path, master)
+    _refresh_artifact_record(
+        outcome.reference.path, "master_initial_conditions.pt"
+    )
+    with pytest.raises(ValueError, match="sampler domain mismatch"):
+        load_validation_certificate(outcome.reference.path)
+
+
+def test_certificate_loader_rejects_p0_02_certificate_revision(
+    tmp_path: Path,
+) -> None:
+    validation_path, _, _ = write_tiny_stack(tmp_path)
+    outcome = ensure_validation(
+        load_validation_spec(validation_path, repo_root=tmp_path)
+    )
+    certificate_path = outcome.reference.path / "certificate.json"
+    certificate = _read_json(certificate_path)
+    certificate["schema_version"] = "pol-validation-certificate-v2"
+    write_strict_json(certificate_path, certificate)
+    _refresh_artifact_record(outcome.reference.path, "certificate.json")
+    with pytest.raises(ValueError, match="P0-03 requires"):
         load_validation_certificate(outcome.reference.path)

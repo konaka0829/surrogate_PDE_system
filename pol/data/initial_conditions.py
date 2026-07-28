@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from pol.numerics.initial_conditions import (
+    GRF_SAMPLER_SEMANTICS,
     sample_gaussian_random_field_initial_conditions,
 )
 
@@ -60,6 +61,7 @@ def generate_grf_archive(
     values = sample_gaussian_random_field_initial_conditions(
         total_samples,
         nx,
+        domain_length=domain_length,
         seed=seed,
         gamma=gamma,
         tau=tau,
@@ -81,8 +83,9 @@ def generate_grf_archive(
             "tau": float(tau),
             "sigma": float(sigma),
             "mean": float(mean),
+            "domain_length": float(domain_length),
+            "sampler_semantics": GRF_SAMPLER_SEMANTICS,
             "dtype": dtype,
             "device": str(resolved_device),
         },
     )
-

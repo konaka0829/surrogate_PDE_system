@@ -11,6 +11,7 @@ import torch
 
 from pol.config.models import MetricCurveReporterSpec, TrialSpec
 from pol.data.dataset import ReferenceDataset
+from pol.numerics.initial_conditions import GRF_SAMPLER_SEMANTICS
 from pol.plotting.reporters import generate_reporters
 from pol.study.trial import TrialEngine, summarize_independent_seed_metrics
 
@@ -98,11 +99,14 @@ def _synthetic_trial_and_dataset() -> tuple[TrialSpec, ReferenceDataset]:
         binding_status="pass",
         target_reference_validation_status="not_claimed",
         binding_proof={
-            "schema_version": "pol-dataset-binding-proof-v1",
+            "schema_version": "pol-dataset-binding-proof-v2",
             "binding_kind": "foundation_only",
             "status": "pass",
             "target_reference_validation_status": "not_claimed",
             "certificate_artifact_id": "synthetic-validation",
+            "grf_sampler_domain_length": 1.0,
+            "grf_sampler_semantics": GRF_SAMPLER_SEMANTICS,
+            "dataset_condition": {"domain_length": 1.0},
             "proof_hash": "synthetic-proof",
         },
         binding_proof_hash="synthetic-proof",

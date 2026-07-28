@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -82,6 +84,7 @@ def test_grf_sampling_is_seed_deterministic(
     kwargs = dict(
         num_samples=3,
         nx=nx,
+        domain_length=1.0,
         seed=19,
         gamma=2.25,
         tau=4.0,
@@ -94,7 +97,179 @@ def test_grf_sampling_is_seed_deterministic(
     second = sample_gaussian_random_field_initial_conditions(**kwargs)
     assert first.shape == (3, nx)
     assert first.dtype == dtype
+    assert first.device == torch.device("cpu")
     assert torch.equal(first, second)
+
+
+def test_grf_unit_domain_output_matches_pre_p0_03_regression() -> None:
+    expected = torch.tensor(
+        [
+            [
+                0.6221994492645122,
+                0.5328401381391653,
+                0.40316923108059954,
+                0.4106692656292553,
+                0.4592239638514888,
+                0.45642908574241686,
+                0.5143068144184001,
+                0.6011620518741617,
+            ],
+            [
+                0.5318873353281477,
+                0.548394373198575,
+                0.6236231162540826,
+                0.5003658580916053,
+                0.4446934415500668,
+                0.3904409815684965,
+                0.44678015037122315,
+                0.5138147436378027,
+            ],
+        ],
+        dtype=torch.float64,
+    )
+    actual = sample_gaussian_random_field_initial_conditions(
+        2,
+        8,
+        domain_length=1.0,
+        seed=2024,
+        gamma=2.25,
+        tau=4.0,
+        sigma=7.0,
+        mean=0.5,
+        device=torch.device("cpu"),
+        dtype=torch.float64,
+    )
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("nx", [15, 16])
+def test_grf_mode_amplitudes_follow_physical_domain_scaling(nx: int) -> None:
+    gamma = 1.75
+    tau = 3.0
+    sigma = 4.0
+    kwargs = {
+        "num_samples": 4,
+        "nx": nx,
+        "seed": 731,
+        "gamma": gamma,
+        "tau": tau,
+        "sigma": sigma,
+        "mean": 0.75,
+        "device": torch.device("cpu"),
+        "dtype": torch.float64,
+    }
+    unit = sample_gaussian_random_field_initial_conditions(
+        **kwargs, domain_length=1.0
+    )
+    doubled = sample_gaussian_random_field_initial_conditions(
+        **kwargs, domain_length=2.0
+    )
+    unit_coefficients = torch.fft.rfft(unit, dim=-1, norm="forward")
+    doubled_coefficients = torch.fft.rfft(doubled, dim=-1, norm="forward")
+
+    modes = torch.arange(1, nx // 2 + 1, dtype=torch.float64)
+    lambda_unit = sigma**2 * (
+        (2.0 * torch.pi * modes / 1.0) ** 2 + tau**2
+    ).pow(-gamma)
+    lambda_doubled = sigma**2 * (
+        (2.0 * torch.pi * modes / 2.0) ** 2 + tau**2
+    ).pow(-gamma)
+    expected_ratio = torch.sqrt(lambda_doubled / lambda_unit)
+    actual_ratio = (
+        doubled_coefficients[:, 1:].abs() / unit_coefficients[:, 1:].abs()
+    )
+
+    assert torch.allclose(
+        actual_ratio,
+        expected_ratio.unsqueeze(0),
+        atol=5e-12,
+        rtol=5e-12,
+    )
+    assert torch.allclose(
+        unit_coefficients[:, 0].real,
+        torch.full((4,), 0.75, dtype=torch.float64),
+        atol=2e-16,
+        rtol=0.0,
+    )
+    assert torch.allclose(
+        doubled_coefficients[:, 0],
+        unit_coefficients[:, 0],
+        atol=2e-16,
+        rtol=0.0,
+    )
+
+
+def test_grf_even_grid_nyquist_uses_physical_wavenumber() -> None:
+    nx = 16
+    domain_length = 2.0
+    mode = nx // 2
+    from_mode_formula = 2.0 * math.pi * mode / domain_length
+    from_nyquist_formula = math.pi * nx / domain_length
+    assert math.isclose(
+        from_mode_formula,
+        from_nyquist_formula,
+        rel_tol=0.0,
+        abs_tol=0.0,
+    )
+
+    kwargs = {
+        "num_samples": 3,
+        "nx": nx,
+        "seed": 937,
+        "gamma": 2.25,
+        "tau": 4.0,
+        "sigma": 5.0,
+        "mean": -0.25,
+        "device": torch.device("cpu"),
+        "dtype": torch.float64,
+    }
+    unit = sample_gaussian_random_field_initial_conditions(
+        **kwargs, domain_length=1.0
+    )
+    physical = sample_gaussian_random_field_initial_conditions(
+        **kwargs, domain_length=domain_length
+    )
+    unit_nyquist = torch.fft.rfft(unit, norm="forward")[:, -1].abs()
+    physical_nyquist = torch.fft.rfft(physical, norm="forward")[:, -1].abs()
+    lambda_unit = kwargs["sigma"] ** 2 * (
+        (math.pi * nx) ** 2 + kwargs["tau"] ** 2
+    ) ** (-kwargs["gamma"])
+    lambda_physical = kwargs["sigma"] ** 2 * (
+        from_nyquist_formula**2 + kwargs["tau"] ** 2
+    ) ** (-kwargs["gamma"])
+    assert torch.allclose(
+        physical_nyquist / unit_nyquist,
+        torch.full_like(unit_nyquist, math.sqrt(lambda_physical / lambda_unit)),
+        atol=5e-12,
+        rtol=5e-12,
+    )
+
+
+@pytest.mark.parametrize(
+    "domain_length",
+    [float("nan"), float("inf"), float("-inf"), 0.0, -1.0],
+)
+def test_grf_rejects_non_finite_or_non_positive_domain_length(
+    domain_length: float,
+) -> None:
+    with pytest.raises(ValueError, match="domain_length must be finite and positive"):
+        sample_gaussian_random_field_initial_conditions(
+            1,
+            8,
+            domain_length=domain_length,
+            seed=0,
+            device=torch.device("cpu"),
+        )
+
+
+def test_grf_domain_length_is_a_required_keyword_argument() -> None:
+    with pytest.raises(TypeError, match="domain_length"):
+        sample_gaussian_random_field_initial_conditions(
+            1,
+            8,
+            seed=0,
+            device=torch.device("cpu"),
+        )
 
 
 def test_burgers_etdrk4_terminal_state_is_finite() -> None:
@@ -116,7 +291,11 @@ def test_burgers_etdrk4_terminal_state_is_finite() -> None:
             fine_dt=0.01,
         ),
         lambda: sample_gaussian_random_field_initial_conditions(
-            0, 16, seed=0, device=torch.device("cpu")
+            0,
+            16,
+            domain_length=1.0,
+            seed=0,
+            device=torch.device("cpu"),
         ),
     ],
 )

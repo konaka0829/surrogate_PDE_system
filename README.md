@@ -41,6 +41,24 @@ trial and study execution path.
 - Directory publication is transactional: incomplete staging trees never
   replace a valid artifact or study run.
 
+## Periodic-domain and GRF convention
+
+Every endpoint-free grid represents the physical periodic domain `[0, L)`,
+with spacing `L / nx`. The Gaussian-random-field sampler requires `L`
+explicitly and constructs Fourier cycles with
+`torch.fft.rfftfreq(nx, d=L / nx)`. Thus integer mode `m` has physical angular
+wavenumber
+
+```text
+k_m = 2 pi m / L
+```
+
+and covariance eigenvalue
+`lambda_m = sigma^2 (k_m^2 + tau^2)^(-gamma)`. The PDE solvers, Fourier maps,
+GRF archive, and validation binding all use the same configured `L`. The
+constant-mode and `(-1)^m` half-domain-shift conventions are independent of
+`L`; the latter represents a physical shift by `L / 2`.
+
 ## Repository layout
 
 ```text
@@ -112,9 +130,12 @@ resampling and Nyquist handling, the real Fourier projector, finite-input/no-
 leak behavior, valid use of `n_tar < J`, fixed-decoder behavior and aliasing,
 and Burgers reference convergence. A passing certificate and master initial-
 condition archive are published under `artifacts/validations/<content-hash>/`.
-The P0-02 certificate records separate machine-readable foundation and Burgers
+The certificate records separate machine-readable foundation and Burgers
 target-reference contracts, selected candidate indices, complete ordered
 candidate lists, exact allowed suffixes, and master-archive tensor hashes.
+The P0-03 foundation contract additionally binds the actual GRF sampler
+semantics and sampler `domain_length` to the resolved domain, serialized
+master archive, and downstream dataset proof.
 
 ### 2. Build or reuse a target dataset
 
@@ -300,9 +321,12 @@ status, target-reference validation status, and proof hash.
 The study-run identity, manifest, summary, frozen model archive, selection
 record, and frozen evaluation plan use the P0-02 `v3` contract. Earlier `v1`
 and `v2` study runs are rejected rather than interpreted with the new binding
-semantics. Validation and dataset artifacts likewise require their P0-02
-revisions. The package version and numerical environment fingerprint also
-separate new runs from earlier cached identities.
+semantics. P0-03 uses validation identity/certificate `v3`, initial-condition
+archive and dataset artifact `v3`, foundation/master binding `v2`, and dataset
+binding proof `v2`. P0-02 artifacts are rejected rather than interpreted with
+the physical-domain GRF semantics. The package version and numerical
+environment fingerprint also separate new runs from earlier cached
+identities.
 
 ## Included profiles
 
@@ -332,12 +356,13 @@ not run by the test suite.
 pytest -q
 ```
 
-The suite covers Fourier and Nyquist behavior, finite-input information
-isolation, strict configuration, dimension independence, fixed and learned
-readouts, artifact tamper detection, foundation validation, dataset splitting,
-unified scalar/sweep planning, selection freezing, test-order enforcement,
-plot regeneration, CLI behavior, and the absence of publication-number
-namespaces from the core package.
+The suite covers Fourier and Nyquist behavior, GRF physical-domain covariance
+scaling on odd and even grids, the unit-domain deterministic regression,
+finite-input information isolation, strict configuration, dimension
+independence, fixed and learned readouts, artifact tamper detection, foundation
+validation, dataset splitting, unified scalar/sweep planning, selection
+freezing, test-order enforcement, plot regeneration, CLI behavior, and the
+absence of publication-number namespaces from the core package.
 
 For a complete local smoke sequence:
 

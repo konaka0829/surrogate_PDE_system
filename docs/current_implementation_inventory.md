@@ -1,6 +1,6 @@
 # Current implementation inventory
 
-This inventory describes the code present at Phase P0-02. It is a
+This inventory describes the code present at Phase P0-03. It is a
 characterization of the current implementation, not a claim that every
 implemented behavior is scientifically final.
 
@@ -26,9 +26,10 @@ a passing certificate, convergence rows, and a master initial-condition
 archive. Exact-byte manifests and transactional publication are implemented by
 the artifact layer. The certificate now separates:
 
-- a foundation contract containing domain, dtype, sample/split counts, seed,
-  the complete initial-condition specification, all general-check statuses,
-  and the master archive's tensor hashes and identity hash;
+- a foundation contract containing domain, the GRF sampler's actual domain and
+  physical-wavenumber semantics, dtype, sample/split counts, seed, the complete
+  initial-condition specification, all general-check statuses, and the master
+  archive's tensor hashes and identity hash;
 - a Burgers target-reference contract containing invariant PDE parameters,
   evolution time, ordered spatial and time candidate lists, selected values
   and indices, selection policy, and machine-readable exact validated suffixes.
@@ -42,7 +43,8 @@ certificate/archive revisions are rejected.
 
 The implemented data path includes:
 
-- deterministic periodic Gaussian-random-field initial conditions;
+- deterministic periodic Gaussian-random-field initial conditions whose
+  physical angular wavenumber is `2 pi m / L`;
 - a content-addressed master initial-condition archive;
 - deterministic, disjoint train/validation/test ID splits;
 - reference datasets evolved by a registered target system;
@@ -61,9 +63,11 @@ binding evaluator constructs a canonical proof before target evolution.
 
 The proof and proof hash participate in dataset identity and are stored in
 `resolved_spec.json`, `metadata.json`, `dataset.pt`, and `ReferenceDataset`.
-Dataset loading cross-checks all copies. Burgers smoke explicitly proves the
-selected-32 to candidate-64 relation. Heat smoke and main remain buildable as
-foundation-only datasets and make no heat convergence claim.
+The proof also binds the GRF sampler's actual `domain_length` to the
+certificate and dataset condition. Dataset loading cross-checks all copies.
+Burgers smoke explicitly proves the selected-32 to candidate-64 relation. Heat
+smoke and main remain buildable as foundation-only datasets and make no heat
+convergence claim.
 
 Checked-in dataset profiles currently provide heat and viscous Burgers targets,
 each in smoke and main sizes. The generic system schema can also describe a
@@ -171,10 +175,14 @@ results and do not receive placeholder seed uncertainty.
   frozen-model schemas use `v3`. `dataset_reference.json` stores the full proof
   and downstream summaries carry its kind/status/target status/hash. P0-01
   `v2` and older run manifests are rejected explicitly.
+- P0-03 validation identity/certificate and initial-condition/dataset archives
+  use `v3`; foundation/master bindings and dataset binding proofs use `v2`.
+  Their identities exclude storage roots, include the sampler semantics and
+  configured domain, and reject P0-02 artifacts under the new GRF semantics.
 - Plot-only regeneration requires an existing verified run and is
   transactional.
 
-## P0-00 characterization baseline and P0-01/P0-02 extensions
+## P0-00 characterization baseline and P0-01/P0-02/P0-03 extensions
 
 The following small deterministic tests fix the behaviors requested for this
 phase. No solver or metric implementation was changed to establish them.
@@ -189,13 +197,14 @@ phase. No solver or metric implementation was changed to establish them.
 | no test access before persisted freeze-plan read-back | `tests/test_study.py::test_study_freezes_selection_before_any_test_evaluation`, completed-run semantic verification, and event-order checks |
 | independent-seed primary statistics and separate prediction ensemble | `tests/test_random_feature_evaluation.py` and the random-feature artifact/verification tests in `tests/test_study.py` |
 | certificate/dataset target-reference binding | `tests/test_dataset_binding.py`, including exact candidate suffix membership, all target-condition mismatch classes, pre-evolution rejection, heat foundation-only status, and dataset/study tamper checks |
+| physical-domain GRF covariance and `L=1` regression | `tests/test_numerics.py::test_grf_unit_domain_output_matches_pre_p0_03_regression`, `test_grf_mode_amplitudes_follow_physical_domain_scaling`, and `test_grf_even_grid_nyquist_uses_physical_wavenumber` |
+| GRF domain provenance and tamper rejection | `tests/test_validation_data.py::test_nonunit_domain_is_bound_across_grf_archive_and_certificate` and the sampler-domain proof/certificate tamper tests in `tests/test_dataset_binding.py` |
 
-## Missing or incomplete after P0-02
+## Missing or incomplete after P0-03
 
 The following are not implemented or are incomplete; they are not repaired in
 this phase:
 
-- GRF spatial frequencies are not parameterized by `domain_length`;
 - heat profiles have no target-specific convergence certificate and therefore
   remain explicitly `foundation_only`;
 - device selection is not propagated as an end-to-end dataset/study execution

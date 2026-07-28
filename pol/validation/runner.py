@@ -9,7 +9,11 @@ import torch
 
 from pol.artifacts import ArtifactRef, ArtifactStore, verify_artifact
 from pol.config.models import BurgersTimeCandidateSpec, ValidationSpec
-from pol.data.initial_conditions import InitialConditionArchive, generate_grf_archive
+from pol.data.initial_conditions import (
+    GRF_SAMPLER_SEMANTICS,
+    InitialConditionArchive,
+    generate_grf_archive,
+)
 from pol.learning.direct import decode_point_observation_to_real_fourier
 from pol.learning.metrics import samplewise_l2_errors
 from pol.learning.observations import observe_equispaced_periodic
@@ -31,7 +35,8 @@ def _scientific_identity(spec: ValidationSpec) -> dict[str, Any]:
     payload = spec.model_dump(mode="json")
     payload.pop("artifact_root", None)
     return {
-        "schema_version": "pol-validation-identity-v2",
+        "schema_version": "pol-validation-identity-v3",
+        "grf_sampler_semantics": GRF_SAMPLER_SEMANTICS,
         "environment": numerical_environment_fingerprint(),
         "spec": payload,
     }
@@ -50,16 +55,18 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
     certificate = json.loads((root / "certificate.json").read_text(encoding="utf-8"))
     if not isinstance(certificate, dict):
         raise ValueError("validation certificate payload must be an object")
-    if certificate.get("schema_version") != "pol-validation-certificate-v2":
+    if certificate.get("schema_version") != "pol-validation-certificate-v3":
         raise ValueError(
-            "unsupported validation certificate schema; P0-02 requires "
-            "pol-validation-certificate-v2"
+            "unsupported validation certificate schema; P0-03 requires "
+            "pol-validation-certificate-v3"
         )
     identity = manifest.get("identity")
     if not isinstance(identity, dict) or identity.get("schema_version") != (
-        "pol-validation-identity-v2"
+        "pol-validation-identity-v3"
     ):
         raise ValueError("unsupported legacy validation artifact identity")
+    if identity.get("grf_sampler_semantics") != GRF_SAMPLER_SEMANTICS:
+        raise ValueError("validation artifact has unsupported GRF sampler semantics")
     resolved = json.loads((root / "resolved_spec.json").read_text(encoding="utf-8"))
     if not isinstance(resolved, dict):
         raise ValueError("validation resolved spec must be an object")
@@ -520,7 +527,7 @@ def _reference_convergence(
 
 def _master_payload(archive: InitialConditionArchive) -> dict[str, Any]:
     return {
-        "schema_version": "pol-initial-condition-archive-v2",
+        "schema_version": "pol-initial-condition-archive-v3",
         "sample_ids": archive.sample_ids.detach().cpu(),
         "values": archive.values.detach().cpu(),
         "fourier": archive.fourier.detach().cpu(),
@@ -536,9 +543,9 @@ def _validate_master_payload_against_spec(
 ) -> None:
     if not isinstance(payload, dict):
         raise ValueError("initial-condition archive payload must be an object")
-    if payload.get("schema_version") != "pol-initial-condition-archive-v2":
+    if payload.get("schema_version") != "pol-initial-condition-archive-v3":
         raise ValueError(
-            "unsupported initial-condition archive schema; P0-02 requires v2"
+            "unsupported initial-condition archive schema; P0-03 requires v3"
         )
     sample_ids = payload.get("sample_ids")
     values = payload.get("values")
@@ -581,6 +588,12 @@ def _validate_master_payload_against_spec(
             )
     if metadata.get("dtype") != spec.samples.dtype:
         raise ValueError("initial-condition archive metadata dtype mismatch")
+    if stable_object_hash(metadata.get("domain_length")) != stable_object_hash(
+        float(spec.domain.length)
+    ):
+        raise ValueError("initial-condition archive sampler domain mismatch")
+    if metadata.get("sampler_semantics") != GRF_SAMPLER_SEMANTICS:
+        raise ValueError("initial-condition archive sampler semantics mismatch")
 
 
 def _master_archive_binding(payload: dict[str, Any]) -> dict[str, Any]:
@@ -589,7 +602,7 @@ def _master_archive_binding(payload: dict[str, Any]) -> dict[str, Any]:
         for name in ("sample_ids", "values", "fourier")
     }
     identity = {
-        "schema_version": "pol-master-initial-condition-binding-v1",
+        "schema_version": "pol-master-initial-condition-binding-v2",
         "archive_schema_version": payload["schema_version"],
         "nx": int(payload["nx"]),
         "total_samples": int(payload["sample_ids"].numel()),
@@ -622,8 +635,12 @@ def _foundation_contract(
     }
     samples = spec.samples
     return {
-        "schema_version": "pol-validation-foundation-contract-v1",
+        "schema_version": "pol-validation-foundation-contract-v2",
         "domain_length": float(spec.domain.length),
+        "grf_sampler_domain_length": float(
+            master_payload["metadata"]["domain_length"]
+        ),
+        "grf_sampler_semantics": master_payload["metadata"]["sampler_semantics"],
         "dtype": samples.dtype,
         "samples": {
             "total_samples": int(samples.total_samples),
@@ -777,7 +794,7 @@ def _certificate_payload(
     if overall == "pass":
         _validate_target_reference_contract(target_reference)
     return {
-        "schema_version": "pol-validation-certificate-v2",
+        "schema_version": "pol-validation-certificate-v3",
         "status": overall,
         "name": spec.name,
         "profile": spec.profile,

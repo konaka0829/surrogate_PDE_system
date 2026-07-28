@@ -32,6 +32,26 @@ An individual component may have an additional, explicitly documented
 limitation. Such a limitation must not be promoted to a general dimension
 constraint.
 
+## Periodic domain and Gaussian random fields
+
+An endpoint-free grid with `nx` points represents `[0, L)` with spacing
+`d = L / nx`. The same finite, strictly positive `L` must be used by the GRF
+sampler, PDE evolution, spectral resampling, Fourier analysis/synthesis,
+archive metadata, and validation/dataset binding.
+
+The GRF sampler requires `domain_length` explicitly. Its integer Fourier mode
+`m` uses physical angular wavenumber
+\(k_m = 2\pi m/L\), and the configured covariance eigenvalue remains
+\(\lambda_m = \sigma^2(k_m^2+\tau^2)^{-\gamma}\). The deterministic constant
+mode, real-field conjugate symmetry, even-grid Nyquist treatment, random draw
+order, and mode-parity factor `(-1)^m` retain their established meanings. In
+particular, the parity factor represents a physical shift by `L/2` and does
+not change when `L` changes.
+
+For `L=1`, the P0-03 correction must preserve the pre-correction deterministic
+sampler output. For `L != 1`, mode-wise amplitudes under identical random draws
+must scale by \(\sqrt{\lambda_m(L_2)/\lambda_m(L_1)}\).
+
 ## Finite-information boundary
 
 The input to every surrogate system must be constructed only from the public

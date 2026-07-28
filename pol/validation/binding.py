@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Mapping
 
 from pol.config.models import DatasetSpec, ValidationSpec
+from pol.numerics.initial_conditions import GRF_SAMPLER_SEMANTICS
 from pol.runtime.hashing import stable_object_hash
 
 
@@ -107,11 +109,52 @@ def _foundation_checks(
             binding_kind=binding_kind,
         )
     requested_samples = validation_spec.samples
+    master = foundation.get("master_initial_conditions")
+    if not isinstance(master, Mapping):
+        raise _failure(
+            path="$.certificate.foundation_contract.master_initial_conditions",
+            allowed="object",
+            requested=master,
+            binding_kind=binding_kind,
+        )
+    master_metadata = master.get("metadata")
+    if not isinstance(master_metadata, Mapping):
+        raise _failure(
+            path="$.certificate.foundation_contract.master_initial_conditions.metadata",
+            allowed="object",
+            requested=master_metadata,
+            binding_kind=binding_kind,
+        )
     exact_values = (
         (
             "$.foundation_contract.domain_length",
             foundation.get("domain_length"),
             float(validation_spec.domain.length),
+        ),
+        (
+            "$.foundation_contract.grf_sampler_domain_length",
+            foundation.get("grf_sampler_domain_length"),
+            float(validation_spec.domain.length),
+        ),
+        (
+            "$.foundation_contract.grf_sampler_semantics",
+            foundation.get("grf_sampler_semantics"),
+            GRF_SAMPLER_SEMANTICS,
+        ),
+        (
+            "$.foundation_contract.master_initial_conditions.domain_length",
+            master.get("domain_length"),
+            float(validation_spec.domain.length),
+        ),
+        (
+            "$.foundation_contract.master_initial_conditions.metadata.domain_length",
+            master_metadata.get("domain_length"),
+            float(validation_spec.domain.length),
+        ),
+        (
+            "$.foundation_contract.master_initial_conditions.metadata.sampler_semantics",
+            master_metadata.get("sampler_semantics"),
+            GRF_SAMPLER_SEMANTICS,
         ),
         (
             "$.foundation_contract.dtype",
@@ -222,6 +265,7 @@ def _evaluate_validated_reference(
     foundation_checks = _foundation_checks(
         certificate, validation_spec, binding_kind=binding_kind
     )
+    foundation = certificate["foundation_contract"]
     contract = certificate.get("target_reference_contract")
     if not isinstance(contract, Mapping):
         raise _failure(
@@ -392,14 +436,16 @@ def _evaluate_validated_reference(
     )
     return _proof_with_hash(
         {
-            "schema_version": "pol-dataset-binding-proof-v1",
+            "schema_version": "pol-dataset-binding-proof-v2",
             "binding_kind": binding_kind,
             "status": "pass",
             "target_reference_validation_status": "validated",
             "certificate_artifact_id": certificate.get("artifact_id"),
-            "foundation_contract_hash": stable_object_hash(
-                certificate["foundation_contract"]
-            ),
+            "grf_sampler_domain_length": foundation[
+                "grf_sampler_domain_length"
+            ],
+            "grf_sampler_semantics": foundation["grf_sampler_semantics"],
+            "foundation_contract_hash": stable_object_hash(foundation),
             "foundation_checks": foundation_checks,
             "validated_condition": dict(contract),
             "allowed_refinement_relation": dict(relation),
@@ -452,11 +498,15 @@ def _evaluate_foundation_only(
     reason = dataset_spec.binding.reason
     return _proof_with_hash(
         {
-            "schema_version": "pol-dataset-binding-proof-v1",
+            "schema_version": "pol-dataset-binding-proof-v2",
             "binding_kind": binding_kind,
             "status": "pass",
             "target_reference_validation_status": "not_claimed",
             "certificate_artifact_id": certificate.get("artifact_id"),
+            "grf_sampler_domain_length": foundation[
+                "grf_sampler_domain_length"
+            ],
+            "grf_sampler_semantics": foundation["grf_sampler_semantics"],
             "foundation_contract_hash": stable_object_hash(foundation),
             "foundation_contract": dict(foundation),
             "foundation_checks": checks,
@@ -490,12 +540,28 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
     proof_hash = copied.pop("proof_hash", None)
     if not isinstance(proof_hash, str) or stable_object_hash(copied) != proof_hash:
         raise ValueError("dataset binding proof hash mismatch")
-    if copied.get("schema_version") != "pol-dataset-binding-proof-v1":
+    if copied.get("schema_version") != "pol-dataset-binding-proof-v2":
         raise ValueError("unsupported dataset binding proof schema")
     if copied.get("status") != "pass":
         raise ValueError("dataset binding proof is not passing")
     kind = copied.get("binding_kind")
     target_status = copied.get("target_reference_validation_status")
+    sampler_domain_length = copied.get("grf_sampler_domain_length")
+    sampler_semantics = copied.get("grf_sampler_semantics")
+    dataset_condition = copied.get("dataset_condition")
+    if sampler_semantics != GRF_SAMPLER_SEMANTICS:
+        raise ValueError("dataset binding proof has unsupported GRF sampler semantics")
+    if (
+        isinstance(sampler_domain_length, bool)
+        or not isinstance(sampler_domain_length, (int, float))
+        or not math.isfinite(float(sampler_domain_length))
+        or float(sampler_domain_length) <= 0.0
+    ):
+        raise ValueError("dataset binding proof has invalid GRF sampler domain")
+    if not isinstance(dataset_condition, Mapping) or not _canonical_equal(
+        sampler_domain_length, dataset_condition.get("domain_length")
+    ):
+        raise ValueError("dataset binding proof GRF sampler domain mismatch")
     if kind == "validated_reference":
         if target_status != "validated":
             raise ValueError(
@@ -514,6 +580,8 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             "status",
             "target_reference_validation_status",
             "certificate_artifact_id",
+            "grf_sampler_domain_length",
+            "grf_sampler_semantics",
             "foundation_contract_hash",
             "foundation_checks",
             "validated_condition",
@@ -524,6 +592,13 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             "per_field_checks",
             "proof_hash",
         }
+        validated_condition = copied.get("validated_condition")
+        if not isinstance(validated_condition, Mapping) or not _canonical_equal(
+            sampler_domain_length, validated_condition.get("domain_length")
+        ):
+            raise ValueError(
+                "validated-reference proof GRF sampler domain mismatch"
+            )
     elif kind == "foundation_only":
         if target_status != "not_claimed":
             raise ValueError(
@@ -539,6 +614,8 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             "status",
             "target_reference_validation_status",
             "certificate_artifact_id",
+            "grf_sampler_domain_length",
+            "grf_sampler_semantics",
             "foundation_contract_hash",
             "foundation_contract",
             "foundation_checks",
@@ -546,6 +623,50 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             "reason",
             "proof_hash",
         }
+        foundation = copied.get("foundation_contract")
+        master = (
+            foundation.get("master_initial_conditions")
+            if isinstance(foundation, Mapping)
+            else None
+        )
+        master_metadata = (
+            master.get("metadata") if isinstance(master, Mapping) else None
+        )
+        domain_copies = (
+            foundation.get("domain_length")
+            if isinstance(foundation, Mapping)
+            else None,
+            foundation.get("grf_sampler_domain_length")
+            if isinstance(foundation, Mapping)
+            else None,
+            master.get("domain_length") if isinstance(master, Mapping) else None,
+            master_metadata.get("domain_length")
+            if isinstance(master_metadata, Mapping)
+            else None,
+        )
+        semantics_copies = (
+            foundation.get("grf_sampler_semantics")
+            if isinstance(foundation, Mapping)
+            else None,
+            master_metadata.get("sampler_semantics")
+            if isinstance(master_metadata, Mapping)
+            else None,
+        )
+        if not isinstance(foundation, Mapping) or stable_object_hash(
+            dict(foundation)
+        ) != copied.get("foundation_contract_hash"):
+            raise ValueError("foundation-only proof foundation contract mismatch")
+        if any(
+            not _canonical_equal(value, sampler_domain_length)
+            for value in domain_copies
+        ):
+            raise ValueError(
+                "foundation-only proof GRF sampler domain mismatch"
+            )
+        if any(value != GRF_SAMPLER_SEMANTICS for value in semantics_copies):
+            raise ValueError(
+                "foundation-only proof GRF sampler semantics mismatch"
+            )
     else:
         raise ValueError("unsupported dataset binding proof kind")
     if any(name not in copied for name in required):

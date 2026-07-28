@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import math
+
 import torch
+
+
+GRF_SAMPLER_SEMANTICS = "physical-angular-wavenumber-2pi-m-over-L-v1"
 
 
 def sample_gaussian_random_field_initial_conditions(
     num_samples: int,
     nx: int,
     *,
+    domain_length: float,
     seed: int,
     gamma: float = 2.0,
     tau: float = 5.0,
@@ -25,16 +31,23 @@ def sample_gaussian_random_field_initial_conditions(
         raise ValueError("tau must be non-negative")
     if sigma < 0.0:
         raise ValueError("sigma must be non-negative")
+    domain_length = float(domain_length)
+    if not math.isfinite(domain_length) or domain_length <= 0.0:
+        raise ValueError("domain_length must be finite and positive")
 
     gen = torch.Generator(device="cpu")
     gen.manual_seed(seed)
 
-    xfreq = torch.fft.rfftfreq(nx, d=1.0 / float(nx), device=device).to(dtype=dtype)
-    wavenumbers = 2.0 * torch.pi * xfreq
+    cycles_per_length = torch.fft.rfftfreq(
+        nx,
+        d=domain_length / float(nx),
+        device=device,
+    ).to(dtype=dtype)
+    wavenumbers = 2.0 * torch.pi * cycles_per_length
     eigvals = (sigma**2) * torch.pow(wavenumbers.pow(2) + tau**2, -gamma)
     eigvals = eigvals.to(device=device, dtype=dtype)
 
-    coeff_shape = (num_samples, xfreq.shape[0])
+    coeff_shape = (num_samples, cycles_per_length.shape[0])
     real_part = torch.zeros(coeff_shape, device=device, dtype=dtype)
     imag_part = torch.zeros(coeff_shape, device=device, dtype=dtype)
 

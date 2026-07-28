@@ -75,7 +75,7 @@ def _scientific_identity(
     payload.pop("artifact_root", None)
     payload.pop("validation_spec", None)
     return {
-        "schema_version": "pol-reference-dataset-identity-v2",
+        "schema_version": "pol-reference-dataset-identity-v3",
         "environment": numerical_environment_fingerprint(),
         "validation_artifact_id": validation_artifact_id,
         "binding_kind": binding_proof["binding_kind"],
@@ -102,9 +102,9 @@ def _load_master(path: Path) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict):
         raise ValueError("initial-condition archive payload must be an object")
-    if payload.get("schema_version") != "pol-initial-condition-archive-v2":
+    if payload.get("schema_version") != "pol-initial-condition-archive-v3":
         raise ValueError(
-            "unsupported legacy initial-condition archive; P0-02 requires v2"
+            "unsupported legacy initial-condition archive; P0-03 requires v3"
         )
     return payload
 
@@ -216,7 +216,7 @@ def _build_dataset(
         "binding_proof": binding_proof,
     }
     metadata_payload = {
-        "schema_version": "pol-reference-dataset-metadata-v2",
+        "schema_version": "pol-reference-dataset-metadata-v3",
         "artifact_id": ref.artifact_id,
         "name": spec.name,
         "validation_artifact_id": validation_ref.artifact_id,
@@ -238,7 +238,7 @@ def _build_dataset(
         },
     }
     archive = {
-        "schema_version": "pol-reference-dataset-v2",
+        "schema_version": "pol-reference-dataset-v3",
         "artifact_id": ref.artifact_id,
         **binding_fields,
         "sample_ids": master_ids.clone(),
@@ -259,7 +259,7 @@ def _build_dataset(
         write_strict_json(
             root / "resolved_spec.json",
             {
-                "schema_version": "pol-dataset-resolved-spec-v2",
+                "schema_version": "pol-dataset-resolved-spec-v3",
                 "validation_artifact_id": validation_ref.artifact_id,
                 **binding_fields,
                 "spec": identity["spec"],
@@ -284,26 +284,26 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
         raise ValueError("artifact is not a dataset")
     identity = manifest.get("identity")
     if not isinstance(identity, dict) or identity.get("schema_version") != (
-        "pol-reference-dataset-identity-v2"
+        "pol-reference-dataset-identity-v3"
     ):
         raise ValueError(
-            "unsupported legacy dataset identity; P0-02 binding proof is required"
+            "unsupported legacy dataset identity; P0-03 GRF binding is required"
         )
     payload = torch.load(root / "dataset.pt", map_location="cpu", weights_only=True)
     if not isinstance(payload, dict):
         raise ValueError("dataset archive payload must be an object")
-    if payload.get("schema_version") != "pol-reference-dataset-v2":
+    if payload.get("schema_version") != "pol-reference-dataset-v3":
         raise ValueError(
-            "unsupported dataset archive schema; P0-02 requires v2"
+            "unsupported dataset archive schema; P0-03 requires v3"
         )
     if payload.get("artifact_id") != manifest.get("artifact_id"):
         raise ValueError("dataset archive identity does not match manifest")
     metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
     if not isinstance(metadata, dict):
         raise ValueError("dataset metadata payload must be an object")
-    if metadata.get("schema_version") != "pol-reference-dataset-metadata-v2":
+    if metadata.get("schema_version") != "pol-reference-dataset-metadata-v3":
         raise ValueError(
-            "unsupported dataset metadata schema; P0-02 requires v2"
+            "unsupported dataset metadata schema; P0-03 requires v3"
         )
     if metadata.get("artifact_id") != payload.get("artifact_id"):
         raise ValueError("dataset metadata identity mismatch")
@@ -312,9 +312,9 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
     )
     if not isinstance(resolved, dict):
         raise ValueError("dataset resolved-spec payload must be an object")
-    if resolved.get("schema_version") != "pol-dataset-resolved-spec-v2":
+    if resolved.get("schema_version") != "pol-dataset-resolved-spec-v3":
         raise ValueError(
-            "unsupported dataset resolved-spec schema; P0-02 requires v2"
+            "unsupported dataset resolved-spec schema; P0-03 requires v3"
         )
     if not _same_canonical_json(resolved.get("spec"), identity.get("spec")):
         raise ValueError("dataset resolved spec does not match artifact identity")

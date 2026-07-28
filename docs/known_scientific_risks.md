@@ -1,4 +1,4 @@
-# Known scientific risks at Phase P0-02
+# Known scientific risks at Phase P0-03
 
 Status terms in this document have strict meanings:
 
@@ -45,24 +45,36 @@ primary rows.
 
 ## R2. GRF frequencies do not use `domain_length`
 
-**Status: confirmed for domains with length other than one; current checked-in
-profiles all use length one.**
+**Status: resolved in P0-03; current checked-in profiles all use length one.**
 
-Relevant code:
+Earlier behavior:
+
+The numerical sampler constructed frequencies with
+`torch.fft.rfftfreq(nx, d=1.0 / nx)`. It had no `domain_length` argument.
+`generate_grf_archive` accepted and recorded `domain_length`, but did not pass
+it to the sampler. Consequently, on `L != 1`, the GRF covariance spectrum used
+unit-domain wavenumbers while PDE solvers and Fourier maps used the configured
+physical length.
+
+P0-03 resolution:
 
 - `pol/numerics/initial_conditions.py::sample_gaussian_random_field_initial_conditions`
-- `pol/data/initial_conditions.py::generate_grf_archive`
+  now requires `domain_length`, rejects non-finite/non-positive values, and
+  constructs `rfftfreq(nx, d=L/nx)`, so `k_m = 2*pi*m/L`.
+- `pol/data/initial_conditions.py::generate_grf_archive` passes the configured
+  length and records the sampler length and semantics.
+- validation archive/certificate/foundation and dataset binding revisions
+  cross-check that the actual sampler length, resolved contract length,
+  serialized archive length, and dataset condition agree. P0-02 artifacts are
+  rejected under the new semantics.
+- focused tests verify the analytic amplitude ratio
+  `sqrt(lambda_m(L2) / lambda_m(L1))` on odd and even grids, including the
+  even-grid Nyquist wavenumber `pi*nx/L`, while retaining the constant mode.
+  A fixed unit-domain regression is bitwise equal to the pre-P0-03 output.
 
-The numerical sampler constructs frequencies with
-`torch.fft.rfftfreq(nx, d=1.0 / nx)`. It has no `domain_length` argument.
-`generate_grf_archive` accepts and records `domain_length`, but does not pass it
-to the sampler.
-
-**Potential impact:** when `domain_length != 1`, the GRF covariance spectrum is
-defined using unit-domain wavenumbers while the PDE solvers and Fourier maps
-use the configured physical length. Correlation scales and the relative
-meaning of `tau` can therefore be inconsistent. No current length-one result
-is affected by this specific discrepancy.
+**Residual caveat:** the correction deliberately changes the GRF distribution
+for `L != 1`. No checked-in `L=1` profile changes numerically, and no main
+profile was executed during P0-03.
 
 ## R3. Validation and dataset solver/reference binding is scientifically weak
 
