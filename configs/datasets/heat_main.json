@@ -1,0 +1,15 @@
+{
+  "schema_version": "pol-dataset-v1",
+  "name": "heat_reference_main",
+  "artifact_root": "artifacts",
+  "validation_spec": "configs/validation/foundation_main.json",
+  "reference_nx": 4096,
+  "target": {
+    "system": {
+      "kind": "heat",
+      "nu": 0.01
+    },
+    "time": 0.01
+  },
+  "batch_size": 20
+}

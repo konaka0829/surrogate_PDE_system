@@ -1,0 +1,6 @@
+torch>=2.0
+numpy>=1.23
+matplotlib>=3.7
+pydantic>=2.7
+pytest>=8.0
+build>=1.2

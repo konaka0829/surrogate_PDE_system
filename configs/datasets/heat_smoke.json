@@ -1,0 +1,15 @@
+{
+  "schema_version": "pol-dataset-v1",
+  "name": "heat_reference_smoke",
+  "artifact_root": "artifacts",
+  "validation_spec": "configs/validation/foundation_smoke.json",
+  "reference_nx": 64,
+  "target": {
+    "system": {
+      "kind": "heat",
+      "nu": 0.1
+    },
+    "time": 0.1
+  },
+  "batch_size": 24
+}

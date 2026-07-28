@@ -1,0 +1,20 @@
+{
+  "schema_version": "pol-dataset-v1",
+  "name": "burgers_reference_main",
+  "artifact_root": "artifacts",
+  "validation_spec": "configs/validation/foundation_main.json",
+  "reference_nx": 4096,
+  "target": {
+    "system": {
+      "kind": "burgers",
+      "nu": 0.01,
+      "advection_coefficient": 1.0,
+      "solver": "split_step",
+      "dt": 0.001,
+      "fine_dt": 1e-05,
+      "dealias": true
+    },
+    "time": 1.0
+  },
+  "batch_size": 20
+}

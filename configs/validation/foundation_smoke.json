@@ -1,0 +1,82 @@
+{
+  "schema_version": "pol-validation-v1",
+  "name": "periodic_burgers_foundation_smoke",
+  "artifact_root": "artifacts",
+  "profile": "smoke",
+  "domain": {
+    "length": 1.0
+  },
+  "samples": {
+    "total_samples": 24,
+    "n_train": 16,
+    "n_validation": 4,
+    "n_test": 4,
+    "seed": 41,
+    "dtype": "float64",
+    "device": "cpu",
+    "initial_condition": {
+      "kind": "periodic_grf",
+      "gamma": 2.0,
+      "tau": 5.0,
+      "sigma": 1.0,
+      "mean": 0.0
+    },
+    "preprocessing": "l2_scaling_only"
+  },
+  "reference_evolution": {
+    "system": {
+      "kind": "burgers",
+      "nu": 0.01,
+      "advection_coefficient": 1.0,
+      "solver": "split_step",
+      "dt": 0.01,
+      "fine_dt": 0.0025,
+      "dealias": true
+    },
+    "time": 0.02
+  },
+  "calibration_sample_ids": [
+    0,
+    1
+  ],
+  "reference_nx_candidates": [
+    32,
+    64
+  ],
+  "time_candidates": [
+    {
+      "solver": "split_step",
+      "dt": 0.01,
+      "fine_dt": 0.005,
+      "dealias": true
+    },
+    {
+      "solver": "split_step",
+      "dt": 0.01,
+      "fine_dt": 0.0025,
+      "dealias": true
+    }
+  ],
+  "q_reference_check": 17,
+  "reference_tolerances": {
+    "mean_relative_l2": 0.05,
+    "max_relative_l2": 0.1,
+    "low_mode_relative_l2": 0.05
+  },
+  "algebraic_tolerances": {
+    "float64_atol": 1e-10,
+    "float64_rtol": 1e-10,
+    "float32_atol": 1e-05,
+    "float32_rtol": 1e-05
+  },
+  "full_interface": {
+    "n_tar": 32,
+    "n_sur": 64,
+    "J": 64,
+    "q": 17
+  },
+  "reduced_observation": {
+    "J": 16,
+    "q": 9
+  }
+}

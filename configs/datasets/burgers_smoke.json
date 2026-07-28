@@ -1,0 +1,20 @@
+{
+  "schema_version": "pol-dataset-v1",
+  "name": "burgers_reference_smoke",
+  "artifact_root": "artifacts",
+  "validation_spec": "configs/validation/foundation_smoke.json",
+  "reference_nx": 64,
+  "target": {
+    "system": {
+      "kind": "burgers",
+      "nu": 0.01,
+      "advection_coefficient": 1.0,
+      "solver": "split_step",
+      "dt": 0.01,
+      "fine_dt": 0.0025,
+      "dealias": true
+    },
+    "time": 0.02
+  },
+  "batch_size": 24
+}

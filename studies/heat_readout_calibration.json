@@ -1,0 +1,197 @@
+{
+  "schema_version": "pol-study-v1",
+  "name": "heat_readout_calibration",
+  "output_root": "outputs/studies",
+  "artifact_root": "artifacts",
+  "profile": "main",
+  "dataset_spec": "configs/datasets/heat_main.json",
+  "base_trial": {
+    "input": {
+      "n_tar": 256,
+      "resampling": "spectral"
+    },
+    "feature": {
+      "kind": "pde_dynamics",
+      "evolution": {
+        "system": {
+          "kind": "heat",
+          "nu": 0.005
+        },
+        "time": 0.01
+      },
+      "n_sur": 256,
+      "observation": {
+        "kind": "equispaced_points",
+        "J": 256,
+        "l2_scale": true
+      }
+    },
+    "output": {
+      "kind": "real_fourier",
+      "q": 65
+    },
+    "readouts": [
+      {
+        "id": "direct",
+        "kind": "direct_fourier_decoder",
+        "display_name": "Model 1"
+      },
+      {
+        "id": "affine",
+        "kind": "affine_ridge",
+        "display_name": "Model 2",
+        "zetas": [
+          0.0,
+          1e-12,
+          1e-10,
+          1e-08,
+          1e-06,
+          0.0001
+        ],
+        "tie_tolerance": 1e-10,
+        "tie_break": "largest_zeta",
+        "svd_rcond": null
+      },
+      {
+        "id": "random",
+        "kind": "random_feature_ridge",
+        "display_name": "Model 3",
+        "activation": "tanh",
+        "widths": [
+          128,
+          256,
+          512
+        ],
+        "weight_scales": [
+          0.25,
+          0.5,
+          1.0
+        ],
+        "bias_scales": [
+          0.0,
+          0.1
+        ],
+        "selection_seeds": [
+          101,
+          102,
+          103,
+          104,
+          105
+        ],
+        "evaluation_seeds": [
+          201,
+          202,
+          203,
+          204,
+          205,
+          206,
+          207,
+          208,
+          209,
+          210
+        ],
+        "zetas": [
+          0.0,
+          1e-12,
+          1e-10,
+          1e-08,
+          1e-06,
+          0.0001
+        ],
+        "tie_tolerance": 1e-10,
+        "svd_rcond": null
+      }
+    ]
+  },
+  "variants": [
+    {
+      "id": "stable",
+      "overrides": {
+        "feature.evolution.system.nu": 0.005
+      },
+      "search": {
+        "kind": "static"
+      }
+    },
+    {
+      "id": "unstable",
+      "overrides": {
+        "feature.evolution.system.nu": 0.015
+      },
+      "search": {
+        "kind": "static"
+      }
+    }
+  ],
+  "global_axes": [
+    {
+      "path": "output.q",
+      "values": [
+        9,
+        17,
+        33,
+        65
+      ]
+    }
+  ],
+  "selection": {
+    "metric": "validation_coefficient_mse",
+    "tie_tolerance": 1e-12,
+    "tie_break": "first_in_config_order",
+    "representative_readout": "affine",
+    "freeze_before_test": true
+  },
+  "diagnostics": [
+    {
+      "kind": "heat_multiplier",
+      "identifiable_variance_floor": 1e-14
+    },
+    {
+      "kind": "noise_robustness",
+      "levels": [
+        0.0,
+        0.0001,
+        0.001,
+        0.01
+      ],
+      "repeats": 20,
+      "seed": 73
+    }
+  ],
+  "reporters": [
+    {
+      "kind": "metric_curve",
+      "filename": "validation_error_vs_q",
+      "x": "q",
+      "metric": "validation_coefficient_mse",
+      "split": "validation",
+      "group_by": [
+        "variant_id",
+        "readout_id"
+      ],
+      "xscale": "linear",
+      "yscale": "log",
+      "formats": [
+        "png",
+        "pdf"
+      ],
+      "dpi": 100
+    },
+    {
+      "kind": "noise_curve",
+      "filename": "noise_robustness",
+      "metric": "field_relative_l2_mean",
+      "formats": [
+        "png"
+      ],
+      "dpi": 100
+    }
+  ],
+  "execution": {
+    "torch_threads": 1,
+    "batch_size": 64,
+    "invalid_trial_policy": "error",
+    "cache_states": true,
+    "generate_plots": true
+  }
+}
