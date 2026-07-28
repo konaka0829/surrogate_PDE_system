@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             if schema == "pol-artifact-manifest-v1":
                 manifest = verify_artifact(path)
                 kind = "artifact"
-            elif schema == "pol-study-run-manifest-v4":
+            elif schema == "pol-study-run-manifest-v5":
                 manifest = verify_study_run(path)
                 kind = "study_run"
             else:

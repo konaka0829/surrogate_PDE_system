@@ -19,6 +19,11 @@ from pol.config.models import (
     TrialSpec,
 )
 from pol.data.dataset import ensure_dataset
+from pol.learning.direct import (
+    DIRECT_DECODER_DIAGNOSTIC_FIELDS,
+    has_fixed_fourier_decoder_diagnostic,
+    verify_fixed_fourier_decoder_diagnostic,
+)
 from pol.plotting.reporters import generate_reporters
 from pol.runtime.artifacts import RunTransaction, manifest_records
 from pol.runtime.device import (
@@ -225,7 +230,7 @@ def _run_manifest(root: Path, *, identity: Mapping[str, Any]) -> None:
     write_strict_json(
         root / "manifest.json",
         {
-            "schema_version": "pol-study-run-manifest-v4",
+            "schema_version": "pol-study-run-manifest-v5",
             "identity": dict(identity),
             "files": manifest_records(root, names),
         },
@@ -256,6 +261,115 @@ def _has_csv_value(row: Mapping[str, Any], key: str) -> bool:
     return key in row and row.get(key) not in ("", None)
 
 
+def _decoder_diagnostic_fields(values: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        field: values[field]
+        for field in DIRECT_DECODER_DIAGNOSTIC_FIELDS
+        if field in values and values.get(field) not in ("", None)
+    }
+
+
+def _verify_no_decoder_diagnostic(
+    values: Mapping[str, Any],
+    *,
+    boundary: str,
+) -> None:
+    if has_fixed_fourier_decoder_diagnostic(values):
+        raise ValueError(
+            f"{boundary} has false direct-decoder diagnostic fields"
+        )
+
+
+def _verify_frozen_decoder_bindings(
+    models: Mapping[str, Any],
+    *,
+    selection: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> tuple[int, int]:
+    """Bind validation-time diagnostics to frozen direct models before test use."""
+    selection_cases = selection.get("cases")
+    plan_cases = plan.get("cases")
+    if not isinstance(selection_cases, Mapping) or not isinstance(
+        plan_cases, Mapping
+    ):
+        raise ValueError("decoder binding requires selection and frozen-plan cases")
+    direct_count = 0
+    zero_fill_count = 0
+    for entry in models.values():
+        if not isinstance(entry, Mapping):
+            raise ValueError("frozen model entry is not an object")
+        try:
+            case_id = str(entry["case_id"])
+            readout_id = str(entry["readout_id"])
+            trial = TrialSpec.model_validate(entry["trial"])
+            model = entry["model"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "frozen model entry cannot bind decoder diagnostics"
+            ) from exc
+        if not isinstance(model, Mapping):
+            raise ValueError("frozen model payload is not an object")
+        selection_case = selection_cases.get(case_id)
+        plan_case = plan_cases.get(case_id)
+        if not isinstance(selection_case, Mapping) or not isinstance(
+            plan_case, Mapping
+        ):
+            raise ValueError("frozen decoder binding references an unknown case")
+        inner_by_readout = selection_case.get("inner_selections")
+        plan_by_readout = plan_case.get("decoder_diagnostics_by_readout")
+        if not isinstance(inner_by_readout, Mapping) or not isinstance(
+            plan_by_readout, Mapping
+        ):
+            raise ValueError("decoder binding records are missing")
+        inner = inner_by_readout.get(readout_id)
+        if not isinstance(inner, Mapping):
+            raise ValueError("selection inner record is missing for frozen readout")
+        J = int(trial.feature.observation.J)
+        q = int(trial.output.q)
+        if model.get("kind") == "direct_fourier_decoder":
+            direct_count += 1
+            model_diagnostic = verify_fixed_fourier_decoder_diagnostic(
+                model,
+                observation_count=J,
+                requested_q=q,
+                boundary="frozen direct model",
+            )
+            verify_fixed_fourier_decoder_diagnostic(
+                inner,
+                observation_count=J,
+                requested_q=q,
+                boundary="direct readout inner selection",
+            )
+            plan_diagnostic = plan_by_readout.get(readout_id)
+            if not isinstance(plan_diagnostic, Mapping):
+                raise ValueError(
+                    "frozen plan is missing direct-decoder diagnostics"
+                )
+            verify_fixed_fourier_decoder_diagnostic(
+                plan_diagnostic,
+                observation_count=J,
+                requested_q=q,
+                boundary="frozen plan direct readout",
+            )
+            if model_diagnostic.zero_fill_applied:
+                zero_fill_count += 1
+        else:
+            _verify_no_decoder_diagnostic(
+                model,
+                boundary="non-direct frozen model",
+            )
+            _verify_no_decoder_diagnostic(
+                inner,
+                boundary="non-direct inner selection",
+            )
+            if readout_id in plan_by_readout:
+                raise ValueError(
+                    "frozen plan has false direct-decoder diagnostics for "
+                    "a non-direct readout"
+                )
+    return direct_count, zero_fill_count
+
+
 def _require_close(actual: Any, expected: float, *, label: str) -> None:
     try:
         value = float(actual)
@@ -269,7 +383,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     identity = manifest.get("identity")
     if not isinstance(identity, Mapping):
         raise ValueError("study-run identity must be an object")
-    if identity.get("schema_version") != "pol-study-run-identity-v4":
+    if identity.get("schema_version") != "pol-study-run-identity-v5":
         raise ValueError("unsupported legacy study-run identity")
     verify_execution_device_policy(
         identity,
@@ -290,7 +404,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError("resolved study does not match manifest identity")
 
     summary = json.loads((root / "run_summary.json").read_text(encoding="utf-8"))
-    if summary.get("schema_version") != "pol-study-run-summary-v4":
+    if summary.get("schema_version") != "pol-study-run-summary-v5":
         raise ValueError("unsupported study-run summary schema")
     verify_execution_device_policy(
         summary,
@@ -306,7 +420,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     selection = json.loads(
         (root / "selection_record.json").read_text(encoding="utf-8")
     )
-    if selection.get("schema_version") != "pol-selection-record-v4":
+    if selection.get("schema_version") != "pol-selection-record-v5":
         raise ValueError("unsupported selection-record schema")
     verify_execution_device_policy(
         selection,
@@ -322,7 +436,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     plan = json.loads(
         (root / "frozen_evaluation_plan.json").read_text(encoding="utf-8")
     )
-    if plan.get("schema_version") != "pol-frozen-evaluation-plan-v4":
+    if plan.get("schema_version") != "pol-frozen-evaluation-plan-v5":
         raise ValueError("unsupported frozen evaluation plan schema")
     verify_execution_device_policy(
         plan,
@@ -403,7 +517,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     if file_sha256(model_path) != plan.get("frozen_models_sha256"):
         raise ValueError("frozen model archive hash mismatch")
     archive = torch.load(model_path, map_location="cpu", weights_only=True)
-    if archive.get("schema_version") != "pol-frozen-model-archive-v4":
+    if archive.get("schema_version") != "pol-frozen-model-archive-v5":
         raise ValueError("unsupported frozen model archive schema")
     verify_execution_device_policy(
         archive,
@@ -435,14 +549,25 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     }
     if actual != expected or len(actual) != len(models):
         raise ValueError("frozen model archive does not match selected candidates")
-    model_by_binding = {
+    entry_by_binding = {
         (
             entry["case_id"],
             entry["readout_id"],
             entry["candidate_id"],
-        ): entry["model"]
+        ): entry
         for entry in models.values()
     }
+    model_by_binding = {
+        binding: entry["model"]
+        for binding, entry in entry_by_binding.items()
+    }
+    direct_diagnostic_count, direct_zero_fill_count = (
+        _verify_frozen_decoder_bindings(
+            models,
+            selection=selection,
+            plan=plan,
+        )
+    )
 
     validation_rows = _load_rows(root / "validation_trials.csv")
     test_rows = _load_rows(root / "test_metrics.csv")
@@ -456,6 +581,46 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError("run summary random-feature-seed-row count mismatch")
     if summary.get("random_feature_ensemble_row_count") != len(ensemble_rows):
         raise ValueError("run summary random-feature-ensemble-row count mismatch")
+    if summary.get("direct_decoder_diagnostic_count") != direct_diagnostic_count:
+        raise ValueError("run summary direct-decoder diagnostic count mismatch")
+    if summary.get("direct_decoder_zero_fill_count") != direct_zero_fill_count:
+        raise ValueError("run summary direct-decoder zero-fill count mismatch")
+    if summary.get("direct_decoder_zero_fill_applied") is not (
+        direct_zero_fill_count > 0
+    ):
+        raise ValueError("run summary direct-decoder zero-fill flag mismatch")
+    for row in validation_rows:
+        if row.get("readout_kind") == "direct_fourier_decoder":
+            try:
+                row_J = int(row["J"])
+                row_q = int(row["q"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "direct validation row has invalid J/q"
+                ) from exc
+            frozen_entry = entry_by_binding.get(_row_binding(row))
+            if frozen_entry is None:
+                J, q = row_J, row_q
+            else:
+                frozen_trial = TrialSpec.model_validate(frozen_entry["trial"])
+                J = int(frozen_trial.feature.observation.J)
+                q = int(frozen_trial.output.q)
+                if (row_J, row_q) != (J, q):
+                    raise ValueError(
+                        "selected direct validation row J/q does not match "
+                        "the frozen trial"
+                    )
+            verify_fixed_fourier_decoder_diagnostic(
+                row,
+                observation_count=J,
+                requested_q=q,
+                boundary="direct validation row",
+            )
+        else:
+            _verify_no_decoder_diagnostic(
+                row,
+                boundary="non-direct validation row",
+            )
     selected_validation = {
         (row.get("case_id"), row.get("readout_id"), row.get("candidate_id"))
         for row in validation_rows
@@ -481,12 +646,20 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     seed_rows_by_binding: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
     for row in seed_rows:
         verify_test_binding(row, table="random-feature seed")
+        _verify_no_decoder_diagnostic(
+            row,
+            boundary="random-feature seed row",
+        )
         seed_rows_by_binding.setdefault(_row_binding(row), []).append(row)
     ensemble_rows_by_binding: dict[
         tuple[Any, Any, Any], list[dict[str, Any]]
     ] = {}
     for row in ensemble_rows:
         verify_test_binding(row, table="random-feature ensemble")
+        _verify_no_decoder_diagnostic(
+            row,
+            boundary="random-feature ensemble row",
+        )
         ensemble_rows_by_binding.setdefault(_row_binding(row), []).append(row)
 
     random_bindings = {
@@ -517,6 +690,30 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         model = model_by_binding[binding]
         if not isinstance(model, Mapping):
             raise ValueError("frozen model entry is not an object")
+        if model.get("kind") == "direct_fourier_decoder":
+            try:
+                row_J = int(row["J"])
+                row_q = int(row["q"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("direct test row has invalid J/q") from exc
+            frozen_trial = TrialSpec.model_validate(
+                entry_by_binding[binding]["trial"]
+            )
+            J = int(frozen_trial.feature.observation.J)
+            q = int(frozen_trial.output.q)
+            if (row_J, row_q) != (J, q):
+                raise ValueError("direct test row J/q does not match the frozen trial")
+            verify_fixed_fourier_decoder_diagnostic(
+                row,
+                observation_count=J,
+                requested_q=q,
+                boundary="direct test row",
+            )
+        else:
+            _verify_no_decoder_diagnostic(
+                row,
+                boundary="non-direct primary test row",
+            )
         if model.get("kind") != "random_feature_ridge":
             if row.get("test_result_kind") != "single_model":
                 raise ValueError("deterministic primary row has the wrong result kind")
@@ -675,7 +872,7 @@ def verify_study_run(path: Path | str) -> dict[str, Any]:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise ValueError("study run has no manifest")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "pol-study-run-manifest-v4":
+    if manifest.get("schema_version") != "pol-study-run-manifest-v5":
         raise ValueError("unsupported study-run manifest")
     expected_records = manifest.get("files")
     if not isinstance(expected_records, list):
@@ -812,7 +1009,7 @@ def run_study(
             "operator-learning studies require nonempty validation and test splits"
         )
     identity = {
-        "schema_version": "pol-study-run-identity-v4",
+        "schema_version": "pol-study-run-identity-v5",
         **execution_device_policy(),
         "environment": numerical_environment_fingerprint(),
         "study": _scientific_spec(spec),
@@ -950,7 +1147,7 @@ def run_study(
         )
 
     selection_record = {
-        "schema_version": "pol-selection-record-v4",
+        "schema_version": "pol-selection-record-v5",
         **execution_device_policy(),
         "study": spec.name,
         "profile": spec.profile,
@@ -992,7 +1189,7 @@ def run_study(
                 "model": evaluation.frozen_models[readout_id],
             }
     frozen_archive = {
-        "schema_version": "pol-frozen-model-archive-v4",
+        "schema_version": "pol-frozen-model-archive-v5",
         **execution_device_policy(),
         "selection_record_hash": selection_hash,
         "models": frozen_models,
@@ -1042,7 +1239,7 @@ def run_study(
         atomic_torch_save(staging / "frozen_models.pt", frozen_archive)
         model_file_hash = file_sha256(staging / "frozen_models.pt")
         frozen_plan = {
-            "schema_version": "pol-frozen-evaluation-plan-v4",
+            "schema_version": "pol-frozen-evaluation-plan-v5",
             **execution_device_policy(),
             "study": spec.name,
             "dataset_artifact_id": dataset.artifact_id,
@@ -1062,6 +1259,13 @@ def run_study(
                     "representative_candidate_id": value[
                         "representative_candidate_id"
                     ],
+                    "decoder_diagnostics_by_readout": {
+                        readout_id: _decoder_diagnostic_fields(inner)
+                        for readout_id, inner in value[
+                            "inner_selections"
+                        ].items()
+                        if has_fixed_fourier_decoder_diagnostic(inner)
+                    },
                 }
                 for case_id, value in selection_cases.items()
             },
@@ -1075,6 +1279,11 @@ def run_study(
 
         # Required durability boundary: read the exact files back before any
         # test state solve or test metric is permitted.
+        loaded_selection = json.loads(
+            (staging / "selection_record.json").read_text(encoding="utf-8")
+        )
+        if stable_object_hash(loaded_selection) != selection_hash:
+            raise ValueError("selection record read-back hash mismatch")
         loaded_plan = json.loads(
             (staging / "frozen_evaluation_plan.json").read_text(encoding="utf-8")
         )
@@ -1116,7 +1325,7 @@ def run_study(
             map_location="cpu",
             weights_only=True,
         )
-        if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v4":
+        if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v5":
             raise ValueError("unsupported frozen model archive schema")
         verify_execution_device_policy(
             loaded_archive,
@@ -1129,6 +1338,13 @@ def run_study(
         )
         if loaded_archive.get("selection_record_hash") != selection_hash:
             raise ValueError("frozen model archive selection binding mismatch")
+        direct_diagnostic_count, direct_zero_fill_count = (
+            _verify_frozen_decoder_bindings(
+                loaded_archive["models"],
+                selection=loaded_selection,
+                plan=loaded_plan,
+            )
+        )
         events.append({"event": "freeze_read_back", "plan_content_hash": frozen_plan_hash})
 
         test_rows: list[dict[str, Any]] = []
@@ -1255,7 +1471,7 @@ def run_study(
                 output_dir=staging / "figures",
             )
         summary = {
-            "schema_version": "pol-study-run-summary-v4",
+            "schema_version": "pol-study-run-summary-v5",
             **execution_device_policy(),
             "status": "pass",
             "study": spec.name,
@@ -1273,6 +1489,9 @@ def run_study(
             "primary_test_row_count": len(test_rows),
             "random_feature_seed_row_count": len(random_seed_rows),
             "random_feature_ensemble_row_count": len(random_ensemble_rows),
+            "direct_decoder_diagnostic_count": direct_diagnostic_count,
+            "direct_decoder_zero_fill_count": direct_zero_fill_count,
+            "direct_decoder_zero_fill_applied": direct_zero_fill_count > 0,
             "selection_record_hash": selection_hash,
             "frozen_plan_hash": frozen_plan_hash,
             "convergence": convergence_statuses,

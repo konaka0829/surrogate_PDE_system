@@ -16,6 +16,8 @@ def write_tiny_stack(
     *,
     global_q_values: tuple[int, ...] = (9,),
     generate_plots: bool = False,
+    observation_J: int = 32,
+    include_diagnostics: bool = True,
 ) -> tuple[Path, Path, Path]:
     artifact_root = root / "artifacts"
     output_root = root / "outputs"
@@ -130,7 +132,7 @@ def write_tiny_stack(
                     "n_sur": 32,
                     "observation": {
                         "kind": "equispaced_points",
-                        "J": 32,
+                        "J": observation_J,
                         "l2_scale": True,
                     },
                 },
@@ -182,7 +184,16 @@ def write_tiny_stack(
                 "representative_readout": "affine",
                 "freeze_before_test": True,
             },
-            "diagnostics": [{"kind": "heat_multiplier", "identifiable_variance_floor": 1e-14}],
+            "diagnostics": (
+                [
+                    {
+                        "kind": "heat_multiplier",
+                        "identifiable_variance_floor": 1e-14,
+                    }
+                ]
+                if include_diagnostics
+                else []
+            ),
             "reporters": (
                 [
                     {

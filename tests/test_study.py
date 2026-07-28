@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 import json
 from pathlib import Path
@@ -9,6 +10,10 @@ import torch
 
 from pol.config.loader import load_dataset_spec, load_study_spec
 from pol.data.dataset import ensure_dataset
+from pol.learning.direct import (
+    DIRECT_DECODER_DIAGNOSTIC_FIELDS,
+    DIRECT_DECODER_POLICY,
+)
 from pol.runtime.artifacts import manifest_records
 from pol.runtime.io import write_csv, write_strict_json
 from pol.study.cache import FeatureStateCache
@@ -52,6 +57,207 @@ def test_global_axis_uses_same_study_executor(tmp_path: Path) -> None:
     plan = plan_study(spec)
     assert plan["case_count"] == 2
     assert {case["global_values"]["output.q"] for case in plan["cases"]} == {5, 9}
+
+
+def test_checked_in_observation_output_plan_keeps_q_greater_than_J_cells() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = load_study_spec(
+        repo_root / "studies" / "observation_output_map_smoke.json",
+        repo_root=repo_root,
+    )
+    plan = plan_study(spec)
+    cells = {
+        (
+            int(case["global_values"]["feature.observation.J"]),
+            int(case["global_values"]["output.q"]),
+        )
+        for case in plan["cases"]
+    }
+    assert plan["case_count"] == 9
+    assert (8, 17) in cells
+    assert any(q > J for J, q in cells)
+
+
+def test_direct_decoder_diagnostic_is_bound_across_study_artifacts(
+    tmp_path: Path,
+) -> None:
+    _, _, study_path = write_tiny_stack(
+        tmp_path,
+        observation_J=4,
+        include_diagnostics=False,
+    )
+    spec = load_study_spec(study_path, repo_root=tmp_path)
+    result = run_study(spec, repo_root=tmp_path)
+    verify_study_run(result.path)
+
+    expected = {
+        "decoder_policy": DIRECT_DECODER_POLICY,
+        "decoder_observation_count": "4",
+        "decoder_requested_q": "9",
+        "decoder_observable_q": "3",
+        "decoder_retained_q": "3",
+        "decoder_requested_max_mode": "4",
+        "decoder_observable_max_mode": "1",
+        "decoder_zero_filled_mode_count": "3",
+        "decoder_zero_filled_coefficient_count": "6",
+        "decoder_zero_fill_applied": "True",
+    }
+    validation_rows = _read_csv(result.path / "validation_trials.csv")
+    direct_validation = next(
+        row for row in validation_rows if row["readout_id"] == "direct"
+    )
+    assert {
+        field: direct_validation[field]
+        for field in DIRECT_DECODER_DIAGNOSTIC_FIELDS
+    } == expected
+    for row in validation_rows:
+        if row["readout_id"] != "direct":
+            assert all(row[field] == "" for field in DIRECT_DECODER_DIAGNOSTIC_FIELDS)
+
+    selection = json.loads(
+        (result.path / "selection_record.json").read_text(encoding="utf-8")
+    )
+    direct_inner = selection["cases"]["heat"]["inner_selections"]["direct"]
+    assert direct_inner["decoder_observable_q"] == 3
+    assert direct_inner["decoder_zero_filled_coefficient_count"] == 6
+    for readout_id in ("affine", "random"):
+        assert not (
+            set(selection["cases"]["heat"]["inner_selections"][readout_id])
+            & set(DIRECT_DECODER_DIAGNOSTIC_FIELDS)
+        )
+
+    archive = torch.load(
+        result.path / "frozen_models.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert archive["schema_version"] == "pol-frozen-model-archive-v5"
+    entries = {
+        entry["readout_id"]: entry for entry in archive["models"].values()
+    }
+    assert entries["direct"]["model"]["decoder_observable_q"] == 3
+    assert (
+        entries["direct"]["model"]["decoder_zero_filled_coefficient_count"]
+        == 6
+    )
+    for readout_id in ("affine", "random"):
+        assert not (
+            set(entries[readout_id]["model"])
+            & set(DIRECT_DECODER_DIAGNOSTIC_FIELDS)
+        )
+    assert entries["affine"]["model"]["W"].shape[0] == 9
+    assert all(
+        member["W"].shape[0] == 9
+        for member in entries["random"]["model"]["members"]
+    )
+
+    plan = json.loads(
+        (result.path / "frozen_evaluation_plan.json").read_text(encoding="utf-8")
+    )
+    plan_diagnostics = plan["cases"]["heat"]["decoder_diagnostics_by_readout"]
+    assert set(plan_diagnostics) == {"direct"}
+    assert plan_diagnostics["direct"]["decoder_zero_fill_applied"] is True
+
+    test_rows = _read_csv(result.path / "test_metrics.csv")
+    direct_test = next(row for row in test_rows if row["readout_id"] == "direct")
+    assert {
+        field: direct_test[field]
+        for field in DIRECT_DECODER_DIAGNOSTIC_FIELDS
+    } == expected
+    for row in test_rows:
+        if row["readout_id"] != "direct":
+            assert all(row[field] == "" for field in DIRECT_DECODER_DIAGNOSTIC_FIELDS)
+    assert result.summary["direct_decoder_diagnostic_count"] == 1
+    assert result.summary["direct_decoder_zero_fill_count"] == 1
+    assert result.summary["direct_decoder_zero_fill_applied"] is True
+
+
+@pytest.mark.parametrize(
+    ("readout_id", "field", "value", "error"),
+    [
+        (
+            "direct",
+            "decoder_observable_q",
+            "5",
+            "direct validation row decoder_observable_q",
+        ),
+        (
+            "affine",
+            "decoder_policy",
+            DIRECT_DECODER_POLICY,
+            "false direct-decoder diagnostic",
+        ),
+    ],
+)
+def test_study_verifier_rejects_decoder_diagnostic_tampering(
+    tmp_path: Path,
+    readout_id: str,
+    field: str,
+    value: str,
+    error: str,
+) -> None:
+    _, _, study_path = write_tiny_stack(
+        tmp_path,
+        observation_J=4,
+        include_diagnostics=False,
+    )
+    result = run_study(
+        load_study_spec(study_path, repo_root=tmp_path),
+        repo_root=tmp_path,
+    )
+    relative_path = "validation_trials.csv"
+    rows = _read_csv(result.path / relative_path)
+    row = next(item for item in rows if item["readout_id"] == readout_id)
+    row[field] = value
+    write_csv(
+        result.path / relative_path,
+        rows,
+        fieldnames=rows[0].keys(),
+    )
+    _refresh_manifest_record(result.path, relative_path)
+    with pytest.raises(ValueError, match=error):
+        verify_study_run(result.path)
+
+
+def test_frozen_decoder_mismatch_stops_before_test_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, study_path = write_tiny_stack(
+        tmp_path,
+        observation_J=4,
+        include_diagnostics=False,
+    )
+    spec = load_study_spec(study_path, repo_root=tmp_path)
+
+    import pol.study.runner as runner_module
+
+    original_save = runner_module.atomic_torch_save
+
+    def tampering_save(path: Path, value: dict[str, object]) -> None:
+        tampered = copy.deepcopy(value)
+        if Path(path).name == "frozen_models.pt":
+            direct = next(
+                entry
+                for entry in tampered["models"].values()
+                if entry["readout_id"] == "direct"
+            )
+            direct["model"]["decoder_retained_q"] = 5
+        original_save(path, tampered)
+
+    def forbidden_test_evaluation(*args, **kwargs):
+        raise AssertionError("test evaluation must not start")
+
+    monkeypatch.setattr(runner_module, "atomic_torch_save", tampering_save)
+    monkeypatch.setattr(
+        "pol.study.trial.TrialEngine.evaluate_test",
+        forbidden_test_evaluation,
+    )
+    with pytest.raises(
+        ValueError,
+        match="frozen direct model decoder_retained_q",
+    ):
+        run_study(spec, repo_root=tmp_path)
 
 
 def test_study_freezes_selection_before_any_test_evaluation(tmp_path: Path) -> None:

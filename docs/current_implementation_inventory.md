@@ -1,6 +1,6 @@
 # Current implementation inventory
 
-This inventory describes the code present at Phase P0-04. It is a
+This inventory describes the code present at Phase P0-05. It is a
 characterization of the current implementation, not a claim that every
 implemented behavior is scientifically final.
 
@@ -18,6 +18,9 @@ flow. A passing certificate currently covers:
   are independent;
 - fixed Fourier decoding for full and reduced band-limited observations, plus
   an aliasing counterexample;
+- explicit fixed-decoder characterization with requested `q` above the
+  observable bandwidth, including coefficient/mode zero-fill ranges,
+  observable-prefix correctness, and exact-zero suffix;
 - Burgers spatial, temporal, and joint reference-convergence comparisons on
   configured calibration samples.
 
@@ -125,7 +128,10 @@ source-grid trigonometric interpolant.
 The unified trial engine implements:
 
 - `direct_fourier_decoder`: an untrained fixed decoder (displayed as Model 1
-  in some study metadata);
+  in some study metadata). Its directly observable real-Fourier prefix has
+  `observable_q=J` for odd `J` and `J-1` for even `J`; requested coefficients
+  after `min(q, observable_q)` are structurally zero-filled and explicitly
+  diagnosed;
 - `affine_ridge`: centered affine ridge regression with validation-selected
   regularization and an SVD minimum-norm path at zero regularization (Model 2);
 - `random_feature_ridge`: skip-connected random nonlinear features followed
@@ -133,6 +139,11 @@ The unified trial engine implements:
   seed sets (Model 3). Evaluation requires at least two distinct seeds.
 
 Display names do not control dispatch.
+
+The fixed-decoder bandwidth is not a generic interface constraint. In
+particular, `q > J` remains valid: affine and random-feature readouts learn
+`q` outputs from a `J`-dimensional feature. No `q <= J` or `n_tar <= J`
+constraint is imposed.
 
 ## Studies and scientific questions
 
@@ -199,20 +210,25 @@ results and do not receive placeholder seed uncertainty.
 - Completed-run verification checks frozen random-feature seed membership,
   recomputes primary mean/standard-deviation/confidence-interval fields from
   per-seed rows, and checks the separate ensemble row and member count.
-- P0-04 study-run identity, manifest, summary, selection, frozen-plan, and
-  frozen-model schemas use `v4`; `dataset_reference.json` uses `v3`.
-  Validation identity/certificate and initial-condition/dataset artifacts use
-  `v4`; foundation/master bindings and dataset binding proofs use `v3`;
+- Direct-decoder diagnostics are recomputed from `J/q` and bound across
+  validation rows, direct inner-selection records, frozen models, frozen
+  plans, test rows, and run-summary counts. Learned readouts must have empty
+  union-CSV diagnostic cells and no frozen/selection diagnostic payload.
+- P0-05 study-run identity, manifest, summary, selection, frozen-plan, and
+  frozen-model schemas use `v5`; `dataset_reference.json` uses `v3`.
+  Validation identity/certificate use `v5`, the foundation contract uses
+  `v4`, initial-condition/dataset artifacts remain at `v4`,
+  foundation/master bindings and dataset binding proofs use `v3`, and
   feature-state identity/archive/metadata use `v2`.
 - Numerical-environment schema `pol-numerical-environment-v2` and package
-  version `0.2.4` join these artifact revisions in preventing pre-P0-04
-  artifacts from being interpreted as CPU-guaranteed. The earlier sampler,
-  domain, target-reference binding, and frozen-test proof semantics remain
-  content-hash inputs.
+  version `0.2.5` join these artifact revisions in preventing pre-P0-05 runs
+  and validation certificates from being interpreted as decoder-diagnostic
+  complete. The earlier sampler, domain, CPU, target-reference binding, and
+  frozen-test proof semantics remain content-hash inputs.
 - Plot-only regeneration requires an existing verified run and is
   transactional.
 
-## P0-00 characterization baseline and P0-01/P0-02/P0-03/P0-04 extensions
+## P0-00 characterization baseline and P0-01--P0-05 extensions
 
 The following small deterministic tests fix the behaviors requested for this
 phase. No solver or metric implementation was changed to establish them.
@@ -231,8 +247,11 @@ phase. No solver or metric implementation was changed to establish them.
 | GRF domain provenance and tamper rejection | `tests/test_validation_data.py::test_nonunit_domain_is_bound_across_grf_archive_and_certificate` and the sampler-domain proof/certificate tamper tests in `tests/test_dataset_binding.py` |
 | CPU-only configuration, boundary placement, provenance, and tamper rejection | `tests/test_device_policy.py`, covering CPU/default acceptance; CUDA/auto rejection under both mocked availability states; no CUDA availability query in resolution; CPU master/dataset/feature/frozen tensors; environment, certificate, proof, identity, and summary policy copies; binding-proof and study-summary policy tamper; and a non-CPU boundary error |
 | P0-04 CPU numerical preservation | `tests/test_device_policy.py::test_p0_04_cpu_deterministic_archive_regression`, which fixes exact tensor hashes for the pre-P0-04 tiny seed/configuration; the pre-existing unit-domain regression and feature-state batching-invariance test remain in force |
+| P0-05 fixed-decoder bandwidth formulas and numerical preservation | parameterized odd/even and below/equal/above-bandwidth tests in `tests/test_learning.py`, including invalid-input rejection, observable-prefix recovery, exact suffix zeros, and exact equality with the pre-diagnostic tensor construction |
+| P0-05 decoder artifact binding and tamper rejection | `tests/test_study.py::test_direct_decoder_diagnostic_is_bound_across_study_artifacts`, diagnostic-tamper cases, and the frozen-mismatch pre-test guard |
+| P0-05 `J x q` independence and foundation characterization | `tests/test_study.py::test_checked_in_observation_output_plan_keeps_q_greater_than_J_cells` and `tests/test_validation_data.py::test_foundation_validation_publishes_passing_certificate` |
 
-## Missing or incomplete after P0-04
+## Missing or incomplete after P0-05
 
 The following are not implemented or are incomplete; they are not repaired in
 this phase:
@@ -241,8 +260,9 @@ this phase:
   remain explicitly `foundation_only`;
 - end-to-end CUDA/GPU execution, GPU artifact provenance, CPU/GPU numerical
   equivalence, mixed precision, and distributed execution are not implemented;
-- the fixed decoder silently zero-pads requested coefficients outside the
-  point-observation bandwidth;
+- the fixed decoder still uses structural zero-fill outside the directly
+  observable point-observation bandwidth; this is now explicit and
+  artifact-bound, but it is not learned extrapolation;
 - there are no checked-in study specifications corresponding to the currently
   undescribed E5, E6, or E7 questions;
 - FNO and DeepONet readouts are not implemented.

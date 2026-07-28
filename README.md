@@ -19,7 +19,8 @@ trial and study execution path.
   separate owners.
 - There is no general `n_tar <= J` assumption. The implemented interface only
   requires the relevant representability constraints, including `J <= n_sur`
-  and `q <= n_tar`.
+  and `q <= n_tar`. There is likewise no general `q <= J` constraint: learned
+  readouts map a `J`-dimensional feature to `q` outputs.
 - The surrogate initial state is constructed from the finite `n_tar` input.
   Discarded reference-grid modes are never recovered or exposed to the feature
   generator.
@@ -164,6 +165,10 @@ master archive, and downstream dataset proof. P0-04 adds a hashed CPU-only
 execution policy to the numerical environment, validation identity,
 certificate, foundation contract, and master archive. Publication and loading
 verify that all master tensors are on CPU.
+P0-05 adds a certificate-bound case with requested `q` above the directly
+observable fixed-decoder bandwidth. It records the requested/observable
+bandwidth, half-open zero-filled coefficient range, zero-filled mode range,
+observable-prefix error, and an exact-zero check for the filled suffix.
 
 ### 2. Build or reuse a target dataset
 
@@ -280,7 +285,10 @@ The implemented feature-generator kinds are:
 
 The implemented readout kinds are:
 
-- `direct_fourier_decoder`: fixed, untrained decoding;
+- `direct_fourier_decoder`: fixed, untrained decoding. For `J` equispaced
+  observations it directly retains `J` real coefficients when `J` is odd and
+  `J-1` when `J` is even; a larger requested odd `q` remains valid and is
+  completed by structural zero-fill;
 - `affine_ridge`: centered affine ridge regression;
 - `random_feature_ridge`: skip-connected random nonlinear features followed by
   an affine ridge readout.
@@ -346,17 +354,41 @@ ensemble row counts. `dataset_reference.json` stores the full dataset binding
 proof, while both it and `run_summary.json` expose the binding kind, binding
 status, target-reference validation status, and proof hash.
 
-P0-04 uses study-run identity, manifest, summary, selection, frozen plan, and
-frozen-model archive `v4`, plus study dataset-reference `v3`. Validation
-identity/certificate and initial-condition/dataset artifact families use `v4`;
-foundation/master binding and dataset binding proof use `v3`; feature-state
-identity/archive/metadata use `v2`. Earlier artifacts and study runs are
-rejected rather than treated as carrying the CPU-only guarantee. Package
-version `0.2.4` and numerical-environment schema
-`pol-numerical-environment-v2` also separate new identities from older cached
-results. The earlier P0-02/P0-03 proof semantics remain intact; the execution
-policy is included in their content hashes rather than inferred from storage
-location or CUDA library metadata.
+For every `direct_fourier_decoder` row, `validation_trials.csv` and
+`test_metrics.csv` publish:
+
+```text
+decoder_policy
+decoder_observation_count
+decoder_requested_q
+decoder_observable_q
+decoder_retained_q
+decoder_requested_max_mode
+decoder_observable_max_mode
+decoder_zero_filled_mode_count
+decoder_zero_filled_coefficient_count
+decoder_zero_fill_applied
+```
+
+The same diagnostic is bound into the direct readout's inner selection record,
+frozen model, and frozen evaluation plan. Learned readout rows leave the union
+CSV columns empty. Completed-run verification recomputes the diagnostic from
+`J` and `q`, rejects false diagnostics on learned readouts, and cross-checks
+the validation, selection, frozen, and test copies. `run_summary.json` records
+the selected direct-decoder diagnostic count, zero-fill count, and any-zero-
+fill flag.
+
+P0-05 uses study-run identity, manifest, summary, selection, frozen plan, and
+frozen-model archive `v5`, plus study dataset-reference `v3`. Validation
+identity/certificate use `v5`, and the validation foundation contract uses
+`v4`; the initial-condition and dataset artifact families remain at `v4`,
+foundation master binding and dataset binding proof remain at `v3`, and
+feature-state identity/archive/metadata remain at `v2`. Earlier study runs and
+validation certificates are rejected rather than treated as carrying complete
+fixed-decoder diagnostics. Package version `0.2.5` and numerical-environment
+schema `pol-numerical-environment-v2` separate new content identities from
+older cached results. The earlier binding and CPU-only semantics remain
+intact.
 
 ## Included profiles
 
@@ -391,6 +423,8 @@ scaling on odd and even grids, unit-domain and P0-04 CPU deterministic
 regressions, finite-input information isolation, strict CPU-only configuration,
 CPU tensor invariants at artifact boundaries, execution-policy tamper
 detection, dimension independence, fixed and learned readouts, artifact tamper
+detection, fixed-decoder observable bandwidth and exact zero-fill regression,
+learned `J -> q` readouts with `q > J`, decoder-diagnostic binding/tamper
 detection, foundation validation, dataset splitting, unified scalar/sweep
 planning, selection freezing, test-order enforcement, plot regeneration, CLI
 behavior, and the absence of publication-number namespaces from the core

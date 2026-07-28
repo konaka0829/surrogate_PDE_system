@@ -18,7 +18,11 @@ from pol.config.models import (
 )
 from pol.data.dataset import ReferenceDataset
 from pol.data.finite import FiniteDataView, derive_finite_view
-from pol.learning.direct import decode_point_observation_to_real_fourier
+from pol.learning.direct import (
+    decode_point_observation_to_real_fourier,
+    fixed_fourier_decoder_bandwidth,
+    verify_fixed_fourier_decoder_diagnostic,
+)
 from pol.learning.metrics import (
     fourier_prediction_metrics,
     fourier_representation_floor,
@@ -227,6 +231,12 @@ def predict_frozen(
     )
     kind = model["kind"]
     if kind == "direct_fourier_decoder":
+        verify_fixed_fourier_decoder_diagnostic(
+            model,
+            observation_count=int(features.shape[-1]),
+            requested_q=q,
+            boundary="frozen direct model",
+        )
         prediction = decode_point_observation_to_real_fourier(
             features, q, domain_length=domain_length
         )
@@ -431,6 +441,10 @@ class TrialEngine:
         L = self.dataset.domain_length
         metric_name = self.study.selection.metric
         if isinstance(readout, DirectReadoutSpec):
+            diagnostic = fixed_fourier_decoder_bandwidth(
+                int(trial.feature.observation.J),
+                q,
+            ).as_artifact_fields()
             prediction = decode_point_observation_to_real_fourier(
                 x_validation, q, domain_length=L
             )
@@ -444,13 +458,21 @@ class TrialEngine:
                 domain_length=L,
             )
             return (
-                _prefix(metrics, "validation"),
+                {
+                    **_prefix(metrics, "validation"),
+                    **diagnostic,
+                },
                 {
                     "kind": "direct_fourier_decoder",
                     "q": q,
                     "domain_length": L,
+                    **diagnostic,
                 },
-                {"kind": "fixed", "parameter_count": 0},
+                {
+                    "kind": "fixed",
+                    "parameter_count": 0,
+                    **diagnostic,
+                },
             )
         if isinstance(readout, AffineRidgeReadoutSpec):
             candidates: list[tuple[float, dict[str, float], Any]] = []
@@ -655,6 +677,15 @@ class TrialEngine:
             **trial_parameters(trial),
             "feature_cache_id": state.cache_id,
         }
+        if model["kind"] == "direct_fourier_decoder":
+            base_row.update(
+                verify_fixed_fourier_decoder_diagnostic(
+                    model,
+                    observation_count=int(trial.feature.observation.J),
+                    requested_q=int(trial.output.q),
+                    boundary="test-evaluation frozen direct model",
+                ).as_artifact_fields()
+            )
         if model["kind"] == "random_feature_ridge":
             seed_rows: list[dict[str, Any]] = []
             seed_metrics: list[dict[str, float]] = []

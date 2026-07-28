@@ -32,6 +32,35 @@ An individual component may have an additional, explicitly documented
 limitation. Such a limitation must not be promoted to a general dimension
 constraint.
 
+## Fixed Fourier decoder bandwidth
+
+The current real Fourier coefficient order is
+`[a_0, a_1, b_1, a_2, b_2, ...]`, and requested `q` is a positive odd
+integer. For the Model 1 fixed decoder applied to `J` equispaced point
+observations, the canonical diagnostic is
+
+```text
+observable_q = J if J is odd else J - 1
+retained_q = min(requested_q, observable_q)
+requested_max_mode = (requested_q - 1) // 2
+observable_max_mode = (observable_q - 1) // 2
+zero_filled_mode_count =
+    max(0, requested_max_mode - observable_max_mode)
+zero_filled_coefficient_count = requested_q - retained_q
+zero_fill_applied = requested_q > observable_q
+```
+
+The even-`J` Nyquist coefficient is not treated as a directly observable
+cosine/sine pair in this odd-`q` basis. The decoder analyzes the observable
+prefix exactly as before and inserts exact zeros for the remaining requested
+coefficients. A request with `q > observable_q`, including `q > J`, is valid
+and must not be converted into an interface error.
+
+This bandwidth limitation belongs only to `direct_fourier_decoder`. Affine
+and random-feature readouts learn a map from `J` features to `q` outputs and
+must not receive a general `q <= J` constraint. It also provides no basis for
+an `n_tar <= J` constraint.
+
 ## Periodic domain and Gaussian random fields
 
 An endpoint-free grid with `nx` points represents `[0, L)` with spacing
@@ -126,6 +155,14 @@ runner must:
 
 Test data must not affect convergence checks, tie breaking, candidate
 selection, rerun decisions, or the contents of the frozen plan.
+
+For a selected direct decoder, the validation-time bandwidth diagnostic must
+be stored in the inner selection record, frozen model, and frozen evaluation
+plan. After frozen-model read-back, it must be recomputed from the frozen
+trial's `J` and `q` and compared with every stored copy before test evaluation
+starts. The canonical diagnostic must be repeated in the Model 1 validation
+and test rows; learned-readout rows must not carry fabricated values in those
+fields.
 
 ## Error spaces
 

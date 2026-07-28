@@ -14,7 +14,10 @@ from pol.data.initial_conditions import (
     InitialConditionArchive,
     generate_grf_archive,
 )
-from pol.learning.direct import decode_point_observation_to_real_fourier
+from pol.learning.direct import (
+    decode_point_observation_to_real_fourier,
+    fixed_fourier_decoder_bandwidth,
+)
 from pol.learning.metrics import samplewise_l2_errors
 from pol.learning.observations import observe_equispaced_periodic
 from pol.math.fourier import real_fourier_analysis, real_fourier_synthesis
@@ -41,7 +44,7 @@ def _scientific_identity(spec: ValidationSpec) -> dict[str, Any]:
     payload = spec.model_dump(mode="json")
     payload.pop("artifact_root", None)
     return {
-        "schema_version": "pol-validation-identity-v4",
+        "schema_version": "pol-validation-identity-v5",
         **execution_device_policy(),
         "grf_sampler_semantics": GRF_SAMPLER_SEMANTICS,
         "environment": numerical_environment_fingerprint(),
@@ -62,14 +65,14 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
     certificate = json.loads((root / "certificate.json").read_text(encoding="utf-8"))
     if not isinstance(certificate, dict):
         raise ValueError("validation certificate payload must be an object")
-    if certificate.get("schema_version") != "pol-validation-certificate-v4":
+    if certificate.get("schema_version") != "pol-validation-certificate-v5":
         raise ValueError(
-            "unsupported validation certificate schema; P0-04 requires "
-            "pol-validation-certificate-v4"
+            "unsupported validation certificate schema; P0-05 requires "
+            "pol-validation-certificate-v5"
         )
     identity = manifest.get("identity")
     if not isinstance(identity, dict) or identity.get("schema_version") != (
-        "pol-validation-identity-v4"
+        "pol-validation-identity-v5"
     ):
         raise ValueError("unsupported legacy validation artifact identity")
     verify_execution_device_policy(
@@ -101,6 +104,10 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
     checks = json.loads((root / "checks.json").read_text(encoding="utf-8"))
     if not isinstance(checks, dict):
         raise ValueError("validation checks payload must be an object")
+    fixed_decoder_check = checks.get("fixed_decoder")
+    if not isinstance(fixed_decoder_check, dict):
+        raise ValueError("validation fixed-decoder check is missing")
+    _validate_decoder_characterization(fixed_decoder_check)
     master = torch.load(
         root / "master_initial_conditions.pt",
         map_location="cpu",
@@ -157,6 +164,56 @@ def _allclose(a: torch.Tensor, b: torch.Tensor, spec: ValidationSpec) -> bool:
         atol = spec.algebraic_tolerances.float64_atol
         rtol = spec.algebraic_tolerances.float64_rtol
     return bool(torch.allclose(a, b, atol=atol, rtol=rtol))
+
+
+def _validate_decoder_characterization(check: dict[str, Any]) -> None:
+    characterization = check.get("zero_fill_characterization")
+    if not isinstance(characterization, dict):
+        raise ValueError("fixed-decoder zero-fill characterization is missing")
+    try:
+        diagnostic = fixed_fourier_decoder_bandwidth(
+            characterization["observation_count"],
+            characterization["requested_q"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "fixed-decoder zero-fill characterization has invalid J/q"
+        ) from exc
+    for field, expected in diagnostic.as_dict().items():
+        if characterization.get(field) != expected:
+            raise ValueError(
+                "fixed-decoder zero-fill characterization does not match "
+                f"the bandwidth formula: {field}"
+            )
+    expected_coefficient_range = {
+        "start_inclusive": diagnostic.retained_q,
+        "stop_exclusive": diagnostic.requested_q,
+    }
+    if characterization.get(
+        "zero_filled_coefficient_index_range"
+    ) != expected_coefficient_range:
+        raise ValueError("fixed-decoder zero-filled coefficient range mismatch")
+    expected_mode_range = {
+        "start_inclusive": diagnostic.observable_max_mode + 1,
+        "stop_inclusive": diagnostic.requested_max_mode,
+    }
+    if characterization.get("zero_filled_mode_range") != expected_mode_range:
+        raise ValueError("fixed-decoder zero-filled mode range mismatch")
+    observable_part = characterization.get("observable_part")
+    zero_filled_part = characterization.get("zero_filled_part")
+    if (
+        characterization.get("status") != "pass"
+        or not isinstance(observable_part, dict)
+        or observable_part.get("status") != "pass"
+        or not isinstance(zero_filled_part, dict)
+        or zero_filled_part.get("status") != "pass"
+        or zero_filled_part.get("exact_zero") is not True
+        or zero_filled_part.get("coefficient_count")
+        != diagnostic.zero_filled_coefficient_count
+    ):
+        raise ValueError(
+            "fixed-decoder zero-fill characterization is not passing"
+        )
 
 
 def _resampling_checks(spec: ValidationSpec) -> dict[str, Any]:
@@ -345,8 +402,58 @@ def _decoder_checks(spec: ValidationSpec) -> dict[str, Any]:
         )
         alias_error = float((aliased - truth).abs().max())
         alias_pass = not _allclose(aliased, truth, spec)
+
+    zero_fill_J = 4
+    zero_fill_q = 7
+    bandwidth = fixed_fourier_decoder_bandwidth(zero_fill_J, zero_fill_q)
+    observable_coefficients = torch.randn(
+        (2, bandwidth.retained_q),
+        generator=generator,
+        dtype=dtype,
+    )
+    requested_coefficients = torch.zeros(
+        (2, zero_fill_q),
+        dtype=dtype,
+    )
+    requested_coefficients[:, : bandwidth.retained_q] = observable_coefficients
+    zero_fill_source_nx = max(8, int(full.n_sur))
+    zero_fill_field = real_fourier_synthesis(
+        requested_coefficients,
+        zero_fill_source_nx,
+        domain_length=L,
+    )
+    zero_fill_features = observe_equispaced_periodic(
+        zero_fill_field,
+        zero_fill_J,
+        domain_length=L,
+        l2_scale=True,
+    )
+    zero_fill_decoded = decode_point_observation_to_real_fourier(
+        zero_fill_features,
+        zero_fill_q,
+        domain_length=L,
+    )
+    observable_part_pass = _allclose(
+        zero_fill_decoded[:, : bandwidth.retained_q],
+        observable_coefficients,
+        spec,
+    )
+    zero_filled_part = zero_fill_decoded[:, bandwidth.retained_q :]
+    zero_filled_part_pass = torch.equal(
+        zero_filled_part,
+        torch.zeros_like(zero_filled_part),
+    )
+    zero_fill_pass = (
+        bandwidth.zero_fill_applied
+        and observable_part_pass
+        and zero_filled_part_pass
+    )
     return {
-        "status": "pass" if full_pass and reduced_pass and alias_pass else "fail",
+        "status": (
+            "pass"
+            if full_pass and reduced_pass and alias_pass and zero_fill_pass
+            else "fail"
+        ),
         "full_observation": {
             "status": "pass" if full_pass else "fail",
             "J": full.J,
@@ -363,6 +470,35 @@ def _decoder_checks(spec: ValidationSpec) -> dict[str, Any]:
             "status": "pass" if alias_pass else "fail",
             "high_mode": alias_k,
             "max_abs_difference": alias_error,
+        },
+        "zero_fill_characterization": {
+            "status": "pass" if zero_fill_pass else "fail",
+            **bandwidth.as_dict(),
+            "source_nx": zero_fill_source_nx,
+            "zero_filled_coefficient_index_range": {
+                "start_inclusive": bandwidth.retained_q,
+                "stop_exclusive": bandwidth.requested_q,
+            },
+            "zero_filled_mode_range": {
+                "start_inclusive": bandwidth.observable_max_mode + 1,
+                "stop_inclusive": bandwidth.requested_max_mode,
+            },
+            "observable_part": {
+                "status": "pass" if observable_part_pass else "fail",
+                "max_abs_error": float(
+                    (
+                        zero_fill_decoded[:, : bandwidth.retained_q]
+                        - observable_coefficients
+                    )
+                    .abs()
+                    .max()
+                ),
+            },
+            "zero_filled_part": {
+                "status": "pass" if zero_filled_part_pass else "fail",
+                "exact_zero": bool(zero_filled_part_pass),
+                "coefficient_count": bandwidth.zero_filled_coefficient_count,
+            },
         },
     }
 
@@ -714,7 +850,7 @@ def _foundation_contract(
     }
     samples = spec.samples
     return {
-        "schema_version": "pol-validation-foundation-contract-v3",
+        "schema_version": "pol-validation-foundation-contract-v4",
         **execution_device_policy(),
         "domain_length": float(spec.domain.length),
         "grf_sampler_domain_length": float(
@@ -741,6 +877,9 @@ def _foundation_contract(
             ),
             "checks": statuses,
         },
+        "fixed_decoder_bandwidth_contract": checks["fixed_decoder"][
+            "zero_fill_characterization"
+        ],
     }
 
 
@@ -874,7 +1013,7 @@ def _certificate_payload(
     if overall == "pass":
         _validate_target_reference_contract(target_reference)
     return {
-        "schema_version": "pol-validation-certificate-v4",
+        "schema_version": "pol-validation-certificate-v5",
         **execution_device_policy(),
         "status": overall,
         "name": spec.name,
@@ -914,6 +1053,7 @@ def run_validation(spec: ValidationSpec, *, force: bool = False) -> ValidationOu
         "finite_input_interface": _finite_interface_checks(spec, archive),
         "fixed_decoder": _decoder_checks(spec),
     }
+    _validate_decoder_characterization(checks["fixed_decoder"])
     convergence, convergence_rows = _reference_convergence(spec, archive)
     checks["reference_convergence"] = convergence
     identity = _scientific_identity(spec)

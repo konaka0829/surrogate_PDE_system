@@ -1,4 +1,4 @@
-# Known scientific risks at Phase P0-04
+# Known scientific risks at Phase P0-05
 
 Status terms in this document have strict meanings:
 
@@ -178,29 +178,54 @@ change the recorded CPU compute policy.
 
 ## R5. Fixed Fourier decoder silently zero-pads unobservable coefficients
 
-**Status: confirmed and characterized by an existing test.**
+**Status: resolved in P0-05 by making the retained bandwidth and structural
+zero-fill explicit without changing the numerical prediction.**
 
 Relevant code:
 
 - `pol/learning/direct.py::decode_point_observation_to_real_fourier`
-- `tests/test_learning.py::test_fixed_decoder_zero_pads_unobservable_output_modes`
+- `pol/learning/direct.py::fixed_fourier_decoder_bandwidth`
+- `pol/study/trial.py::TrialEngine`
+- `pol/study/runner.py::verify_study_run`
+- `pol/validation/runner.py::_decoder_checks`
 
-The decoder defines `q_observable` from `J`, analyzes only
-`min(q, q_observable)` coefficients, and concatenates zeros when the requested
-odd `q` is larger. The general trial schema permits this because `q` belongs to
-the finite output interface and is not constrained by `J`.
+Earlier behavior:
 
-**Potential impact:** the fixed decoder's output can contain structural zeros
-without an explicit result flag. Comparisons at `q > q_observable` may be
-interpreted as learned or observed predictions for coefficients that the fixed
-decoder never estimated. This is a Model 1 limitation, not a reason to add a
-general `q <= J` or `n_tar <= J` constraint.
+The decoder defined `q_observable` from `J`, analyzed only
+`min(q, q_observable)` coefficients, and concatenated zeros when the requested
+odd `q` was larger. That numerical behavior had unit coverage, but result
+tables and frozen evaluation artifacts did not distinguish estimated
+coefficients from structural zeros.
+
+P0-05 resolution:
+
+- one immutable helper now defines `observable_q`, `retained_q`, requested and
+  observable maximum modes, both zero-fill counts, the application flag, and
+  a versioned decoder policy;
+- `observable_q = J` for odd `J` and `J-1` for even `J`; the even-grid Nyquist
+  term is not counted as an observable pair in the odd-`q` real basis;
+- direct validation rows, inner selection records, frozen models, frozen
+  plans, and test rows carry the same `decoder_*` fields;
+- frozen read-back recomputes the diagnostic from `J/q` before any test
+  feature solve or metric, and completed-run verification rejects formula
+  mismatches, cross-artifact mismatches, inconsistent flags/counts, and false
+  diagnostics on learned readouts;
+- foundation validation now records an explicit `q > observable_q`
+  characterization with the zero-filled coefficient/mode ranges, correctness
+  of the observable prefix, and exact zero of the suffix;
+- an exact tensor regression fixes the pre-P0-05 numerical output.
+
+**Residual caveat:** zero-fill remains a structural Model 1 policy, not learned
+extrapolation. A high-mode comparison may therefore remain unfavorable, but
+the result row now states why. The general trial schema continues to permit
+`q > J`: Model 2/3 learn `q` outputs from `J` features, so neither `q <= J` nor
+`n_tar <= J` is a valid general interface constraint.
 
 ## Items not yet verified
 
 - The authoritative historical mapping from E0--E7 or Figure numbers to the
   current question-based studies is absent from this repository.
-- No main profile was run in P0-04, so this phase establishes the CPU execution
-  contract using focused tests and checked-in smoke profiles rather than new
-  production-resolution results.
+- No main profile was run in P0-05. The fixed-decoder artifact contract is
+  established with focused tests, foundation smoke validation, and checked-in
+  smoke studies rather than new production-resolution results.
 - This inventory does not establish cross-device numerical equivalence.

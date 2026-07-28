@@ -23,6 +23,33 @@ def test_foundation_validation_publishes_passing_certificate(tmp_path: Path) -> 
     assert outcome.certificate["status"] == "pass"
     checks = json.loads((outcome.reference.path / "checks.json").read_text(encoding="utf-8"))
     assert checks["finite_input_interface"]["dimension_independence"]["n_tar_le_J_exercised"]
+    zero_fill = checks["fixed_decoder"]["zero_fill_characterization"]
+    assert zero_fill["status"] == "pass"
+    assert zero_fill["requested_q"] == 7
+    assert zero_fill["observable_q"] == 3
+    assert zero_fill["retained_q"] == 3
+    assert zero_fill["zero_filled_coefficient_count"] == 4
+    assert zero_fill["zero_filled_mode_count"] == 2
+    assert zero_fill["zero_filled_coefficient_index_range"] == {
+        "start_inclusive": 3,
+        "stop_exclusive": 7,
+    }
+    assert zero_fill["zero_filled_mode_range"] == {
+        "start_inclusive": 2,
+        "stop_inclusive": 3,
+    }
+    assert zero_fill["observable_part"]["status"] == "pass"
+    assert zero_fill["zero_filled_part"] == {
+        "status": "pass",
+        "exact_zero": True,
+        "coefficient_count": 4,
+    }
+    assert (
+        outcome.certificate["foundation_contract"][
+            "fixed_decoder_bandwidth_contract"
+        ]
+        == zero_fill
+    )
     assert (outcome.reference.path / "master_initial_conditions.pt").is_file()
 
 
@@ -71,10 +98,10 @@ def test_nonunit_domain_is_bound_across_grf_archive_and_certificate(
     foundation = outcome.certificate["foundation_contract"]
     master_binding = foundation["master_initial_conditions"]
 
-    assert manifest["identity"]["schema_version"] == "pol-validation-identity-v4"
+    assert manifest["identity"]["schema_version"] == "pol-validation-identity-v5"
     assert master["schema_version"] == "pol-initial-condition-archive-v4"
-    assert outcome.certificate["schema_version"] == "pol-validation-certificate-v4"
-    assert foundation["schema_version"] == "pol-validation-foundation-contract-v3"
+    assert outcome.certificate["schema_version"] == "pol-validation-certificate-v5"
+    assert foundation["schema_version"] == "pol-validation-foundation-contract-v4"
     assert master_binding["schema_version"] == (
         "pol-master-initial-condition-binding-v3"
     )
