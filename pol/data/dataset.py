@@ -12,6 +12,14 @@ from pol.config.loader import load_validation_spec
 from pol.config.models import DatasetSpec
 from pol.math.periodic import spectral_resample_periodic
 from pol.runtime.environment import numerical_environment_fingerprint
+from pol.runtime.device import (
+    COMPUTE_DEVICE,
+    EXECUTION_DEVICE_POLICY,
+    execution_device_policy,
+    require_cpu_tensor,
+    require_cpu_tensors,
+    verify_execution_device_policy,
+)
 from pol.runtime.hashing import stable_object_hash, tensor_sha256
 from pol.runtime.io import atomic_torch_save, write_strict_json
 from pol.systems.registry import evolve
@@ -40,12 +48,19 @@ class ReferenceDataset:
     target_reference_validation_status: str
     binding_proof: dict[str, Any]
     binding_proof_hash: str
+    execution_device_policy: str = EXECUTION_DEVICE_POLICY
+    compute_device: str = COMPUTE_DEVICE
 
     @property
     def total_samples(self) -> int:
         return int(self.sample_ids.numel())
 
     def positions(self, ids: torch.Tensor) -> torch.Tensor:
+        require_cpu_tensor(
+            ids,
+            boundary="loaded ReferenceDataset sample selection",
+            name="sample_ids",
+        )
         if ids.ndim != 1 or ids.dtype != torch.long:
             raise ValueError("sample ids must be a one-dimensional long tensor")
         lookup = {int(value): index for index, value in enumerate(self.sample_ids.tolist())}
@@ -75,7 +90,8 @@ def _scientific_identity(
     payload.pop("artifact_root", None)
     payload.pop("validation_spec", None)
     return {
-        "schema_version": "pol-reference-dataset-identity-v3",
+        "schema_version": "pol-reference-dataset-identity-v4",
+        **execution_device_policy(),
         "environment": numerical_environment_fingerprint(),
         "validation_artifact_id": validation_artifact_id,
         "binding_kind": binding_proof["binding_kind"],
@@ -102,10 +118,19 @@ def _load_master(path: Path) -> dict[str, Any]:
     payload = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict):
         raise ValueError("initial-condition archive payload must be an object")
-    if payload.get("schema_version") != "pol-initial-condition-archive-v3":
+    if payload.get("schema_version") != "pol-initial-condition-archive-v4":
         raise ValueError(
-            "unsupported legacy initial-condition archive; P0-03 requires v3"
+            "unsupported legacy initial-condition archive; P0-04 requires v4"
         )
+    verify_execution_device_policy(
+        payload,
+        boundary="dataset master initial-condition archive",
+    )
+    require_cpu_tensors(
+        payload,
+        boundary="dataset master initial-condition archive load",
+        name="master",
+    )
     return payload
 
 
@@ -162,6 +187,11 @@ def _build_dataset(
     master = _load_master(validation_ref.path / "master_initial_conditions.pt")
     master_values: torch.Tensor = master["values"]
     master_ids: torch.Tensor = master["sample_ids"]
+    require_cpu_tensors(
+        {"values": master_values, "sample_ids": master_ids},
+        boundary="dataset target-generation input",
+        name="master",
+    )
     if int(spec.reference_nx) > int(master["nx"]):
         raise ValueError(
             f"dataset reference_nx={spec.reference_nx} exceeds validated master nx={master['nx']}"
@@ -169,16 +199,35 @@ def _build_dataset(
     inputs = spectral_resample_periodic(
         master_values, int(spec.reference_nx), domain_length=validation_spec.domain.length
     )
+    require_cpu_tensor(
+        inputs,
+        boundary="dataset target-generation input resampling",
+        name="inputs",
+    )
     targets: list[torch.Tensor] = []
     metadata: dict[str, Any] | None = None
     evolution = spec.target.model_dump(mode="json")
     for start in range(0, inputs.shape[0], int(spec.batch_size)):
         batch = inputs[start : start + int(spec.batch_size)]
+        require_cpu_tensor(
+            batch,
+            boundary="dataset target-generation batch",
+            name=f"inputs[{start}:{start + int(spec.batch_size)}]",
+        )
         values, batch_metadata = evolve(
             batch,
             evolution,
             domain_length=validation_spec.domain.length,
         )
+        require_cpu_tensor(
+            values,
+            boundary="dataset target-generation batch result",
+            name=f"targets[{start}:{start + int(spec.batch_size)}]",
+        )
+        if batch_metadata.get("device") != "cpu":
+            raise RuntimeError(
+                "dataset target-generation solver metadata must report device=cpu"
+            )
         targets.append(values.detach().cpu())
         if metadata is None:
             metadata = batch_metadata
@@ -189,6 +238,11 @@ def _build_dataset(
         }:
             raise RuntimeError("target solver metadata changed between batches")
     target_values = torch.cat(targets, dim=0)
+    require_cpu_tensor(
+        target_values,
+        boundary="dataset target-generation result",
+        name="targets_reference",
+    )
     samples = validation_spec.samples
     train_ids, validation_ids, test_ids = _split_ids(
         samples.total_samples,
@@ -215,8 +269,10 @@ def _build_dataset(
         "binding_proof_hash": binding_proof["proof_hash"],
         "binding_proof": binding_proof,
     }
+    policy_fields = execution_device_policy()
     metadata_payload = {
-        "schema_version": "pol-reference-dataset-metadata-v3",
+        "schema_version": "pol-reference-dataset-metadata-v4",
+        **policy_fields,
         "artifact_id": ref.artifact_id,
         "name": spec.name,
         "validation_artifact_id": validation_ref.artifact_id,
@@ -238,7 +294,8 @@ def _build_dataset(
         },
     }
     archive = {
-        "schema_version": "pol-reference-dataset-v3",
+        "schema_version": "pol-reference-dataset-v4",
+        **policy_fields,
         "artifact_id": ref.artifact_id,
         **binding_fields,
         "sample_ids": master_ids.clone(),
@@ -254,12 +311,18 @@ def _build_dataset(
         "split_hash": split_hash,
         "validation_artifact_id": validation_ref.artifact_id,
     }
+    require_cpu_tensors(
+        archive,
+        boundary="dataset archive publication",
+        name="dataset",
+    )
 
     def writer(root: Path) -> Iterable[str]:
         write_strict_json(
             root / "resolved_spec.json",
             {
-                "schema_version": "pol-dataset-resolved-spec-v3",
+                "schema_version": "pol-dataset-resolved-spec-v4",
+                **policy_fields,
                 "validation_artifact_id": validation_ref.artifact_id,
                 **binding_fields,
                 "spec": identity["spec"],
@@ -284,27 +347,51 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
         raise ValueError("artifact is not a dataset")
     identity = manifest.get("identity")
     if not isinstance(identity, dict) or identity.get("schema_version") != (
-        "pol-reference-dataset-identity-v3"
+        "pol-reference-dataset-identity-v4"
     ):
         raise ValueError(
-            "unsupported legacy dataset identity; P0-03 GRF binding is required"
+            "unsupported legacy dataset identity; P0-04 CPU-only binding is required"
         )
+    verify_execution_device_policy(
+        identity,
+        boundary="dataset identity",
+    )
+    environment = identity.get("environment")
+    if not isinstance(environment, dict):
+        raise ValueError("dataset numerical environment is missing")
+    verify_execution_device_policy(
+        environment,
+        boundary="dataset numerical environment",
+    )
     payload = torch.load(root / "dataset.pt", map_location="cpu", weights_only=True)
     if not isinstance(payload, dict):
         raise ValueError("dataset archive payload must be an object")
-    if payload.get("schema_version") != "pol-reference-dataset-v3":
+    if payload.get("schema_version") != "pol-reference-dataset-v4":
         raise ValueError(
-            "unsupported dataset archive schema; P0-03 requires v3"
+            "unsupported dataset archive schema; P0-04 requires v4"
         )
+    verify_execution_device_policy(
+        payload,
+        boundary="dataset archive",
+    )
+    require_cpu_tensors(
+        payload,
+        boundary="dataset archive load",
+        name="dataset",
+    )
     if payload.get("artifact_id") != manifest.get("artifact_id"):
         raise ValueError("dataset archive identity does not match manifest")
     metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
     if not isinstance(metadata, dict):
         raise ValueError("dataset metadata payload must be an object")
-    if metadata.get("schema_version") != "pol-reference-dataset-metadata-v3":
+    if metadata.get("schema_version") != "pol-reference-dataset-metadata-v4":
         raise ValueError(
-            "unsupported dataset metadata schema; P0-03 requires v3"
+            "unsupported dataset metadata schema; P0-04 requires v4"
         )
+    verify_execution_device_policy(
+        metadata,
+        boundary="dataset metadata",
+    )
     if metadata.get("artifact_id") != payload.get("artifact_id"):
         raise ValueError("dataset metadata identity mismatch")
     resolved = json.loads(
@@ -312,10 +399,14 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
     )
     if not isinstance(resolved, dict):
         raise ValueError("dataset resolved-spec payload must be an object")
-    if resolved.get("schema_version") != "pol-dataset-resolved-spec-v3":
+    if resolved.get("schema_version") != "pol-dataset-resolved-spec-v4":
         raise ValueError(
-            "unsupported dataset resolved-spec schema; P0-03 requires v3"
+            "unsupported dataset resolved-spec schema; P0-04 requires v4"
         )
+    verify_execution_device_policy(
+        resolved,
+        boundary="dataset resolved specification",
+    )
     if not _same_canonical_json(resolved.get("spec"), identity.get("spec")):
         raise ValueError("dataset resolved spec does not match artifact identity")
     binding_proof = identity.get("binding_proof")
@@ -444,6 +535,12 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
         or not _same_canonical_json(proof_dataset_condition.get("dtype"), dtype_name)
     ):
         raise ValueError("dataset dtype binding mismatch")
+    target_metadata = payload.get("target_metadata")
+    if (
+        not isinstance(target_metadata, dict)
+        or target_metadata.get("device") != "cpu"
+    ):
+        raise ValueError("dataset target solver metadata must report device=cpu")
     if (
         not _same_canonical_json(
             metadata.get("target"), identity_spec.get("target")
@@ -465,7 +562,7 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
         reference_nx=int(payload["reference_nx"]),
         domain_length=domain_length,
         dtype_name=dtype_name,
-        target_metadata=dict(payload["target_metadata"]),
+        target_metadata=dict(target_metadata),
         split_hash=str(payload["split_hash"]),
         validation_artifact_id=str(validation_artifact_id),
         binding_kind=str(identity["binding_kind"]),
@@ -475,4 +572,6 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
         ),
         binding_proof=dict(binding_proof),
         binding_proof_hash=str(identity["binding_proof_hash"]),
+        execution_device_policy=str(identity["execution_device_policy"]),
+        compute_device=str(identity["compute_device"]),
     )

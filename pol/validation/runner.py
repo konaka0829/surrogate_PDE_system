@@ -20,6 +20,12 @@ from pol.learning.observations import observe_equispaced_periodic
 from pol.math.fourier import real_fourier_analysis, real_fourier_synthesis
 from pol.math.periodic import periodic_grid, spectral_resample_periodic
 from pol.runtime.environment import numerical_environment_fingerprint
+from pol.runtime.device import (
+    execution_device_policy,
+    require_cpu_tensor,
+    require_cpu_tensors,
+    verify_execution_device_policy,
+)
 from pol.runtime.hashing import stable_object_hash, tensor_sha256
 from pol.runtime.io import atomic_torch_save, write_csv, write_strict_json
 from pol.systems.registry import evolve
@@ -35,7 +41,8 @@ def _scientific_identity(spec: ValidationSpec) -> dict[str, Any]:
     payload = spec.model_dump(mode="json")
     payload.pop("artifact_root", None)
     return {
-        "schema_version": "pol-validation-identity-v3",
+        "schema_version": "pol-validation-identity-v4",
+        **execution_device_policy(),
         "grf_sampler_semantics": GRF_SAMPLER_SEMANTICS,
         "environment": numerical_environment_fingerprint(),
         "spec": payload,
@@ -55,16 +62,31 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
     certificate = json.loads((root / "certificate.json").read_text(encoding="utf-8"))
     if not isinstance(certificate, dict):
         raise ValueError("validation certificate payload must be an object")
-    if certificate.get("schema_version") != "pol-validation-certificate-v3":
+    if certificate.get("schema_version") != "pol-validation-certificate-v4":
         raise ValueError(
-            "unsupported validation certificate schema; P0-03 requires "
-            "pol-validation-certificate-v3"
+            "unsupported validation certificate schema; P0-04 requires "
+            "pol-validation-certificate-v4"
         )
     identity = manifest.get("identity")
     if not isinstance(identity, dict) or identity.get("schema_version") != (
-        "pol-validation-identity-v3"
+        "pol-validation-identity-v4"
     ):
         raise ValueError("unsupported legacy validation artifact identity")
+    verify_execution_device_policy(
+        identity,
+        boundary="validation artifact identity",
+    )
+    environment = identity.get("environment")
+    if not isinstance(environment, dict):
+        raise ValueError("validation artifact numerical environment is missing")
+    verify_execution_device_policy(
+        environment,
+        boundary="validation numerical environment",
+    )
+    verify_execution_device_policy(
+        certificate,
+        boundary="validation certificate",
+    )
     if identity.get("grf_sampler_semantics") != GRF_SAMPLER_SEMANTICS:
         raise ValueError("validation artifact has unsupported GRF sampler semantics")
     resolved = json.loads((root / "resolved_spec.json").read_text(encoding="utf-8"))
@@ -83,6 +105,11 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
         root / "master_initial_conditions.pt",
         map_location="cpu",
         weights_only=True,
+    )
+    require_cpu_tensors(
+        master,
+        boundary="master initial-condition archive load",
+        name="master",
     )
     _validate_master_payload_against_spec(master, spec)
     try:
@@ -143,6 +170,11 @@ def _resampling_checks(spec: ValidationSpec) -> dict[str, Any]:
         source = 0.3 + 0.7 * torch.cos(2 * torch.pi * k * x_in / L)
         expected = 0.3 + 0.7 * torch.cos(2 * torch.pi * k * x_out / L)
         actual = spectral_resample_periodic(source, n_out, domain_length=L)
+        require_cpu_tensor(
+            actual,
+            boundary="validation periodic-resampling check",
+            name="actual",
+        )
         error = float((actual - expected).abs().max())
         rows.append(
             {
@@ -198,6 +230,11 @@ def _fourier_projector_check(spec: ValidationSpec) -> dict[str, Any]:
 
 
 def _finite_interface_checks(spec: ValidationSpec, archive: InitialConditionArchive) -> dict[str, Any]:
+    require_cpu_tensors(
+        archive.__dict__,
+        boundary="validation finite-interface check",
+        name="archive",
+    )
     dims = spec.full_interface
     L = float(spec.domain.length)
     ids = torch.tensor(spec.calibration_sample_ids, dtype=torch.long, device=archive.values.device)
@@ -394,6 +431,11 @@ def _reference_convergence(
     spec: ValidationSpec,
     archive: InitialConditionArchive,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    require_cpu_tensors(
+        archive.__dict__,
+        boundary="validation reference-convergence input",
+        name="archive",
+    )
     L = float(spec.domain.length)
     ids = torch.tensor(spec.calibration_sample_ids, dtype=torch.long, device=archive.values.device)
     initial_master = archive.values.index_select(0, ids)
@@ -408,6 +450,11 @@ def _reference_convergence(
             initial,
             _candidate_evolution(spec, finest_candidate),
             domain_length=L,
+        )
+        require_cpu_tensor(
+            solution,
+            boundary="validation spatial reference-convergence solve",
+            name=f"solution_nx_{nx}",
         )
         spatial_solutions[nx] = solution
         metadata[f"spatial_{nx}"] = meta
@@ -441,6 +488,11 @@ def _reference_convergence(
             initial_finest,
             _candidate_evolution(spec, candidate),
             domain_length=L,
+        )
+        require_cpu_tensor(
+            solution,
+            boundary="validation temporal reference-convergence solve",
+            name=f"solution_candidate_{len(temporal_solutions)}",
         )
         temporal_solutions.append(solution)
         temporal_metadata.append(meta)
@@ -478,6 +530,11 @@ def _reference_convergence(
             selected_initial,
             _candidate_evolution(spec, candidates[selected_time_index]),
             domain_length=L,
+        )
+        require_cpu_tensor(
+            selected_solution,
+            boundary="validation joint reference-convergence solve",
+            name="selected_solution",
         )
         joint_metrics = _pair_metrics(
             selected_solution,
@@ -526,8 +583,14 @@ def _reference_convergence(
 
 
 def _master_payload(archive: InitialConditionArchive) -> dict[str, Any]:
+    require_cpu_tensors(
+        archive.__dict__,
+        boundary="master initial-condition archive publication",
+        name="archive",
+    )
     return {
-        "schema_version": "pol-initial-condition-archive-v3",
+        "schema_version": "pol-initial-condition-archive-v4",
+        **execution_device_policy(),
         "sample_ids": archive.sample_ids.detach().cpu(),
         "values": archive.values.detach().cpu(),
         "fourier": archive.fourier.detach().cpu(),
@@ -543,10 +606,19 @@ def _validate_master_payload_against_spec(
 ) -> None:
     if not isinstance(payload, dict):
         raise ValueError("initial-condition archive payload must be an object")
-    if payload.get("schema_version") != "pol-initial-condition-archive-v3":
+    if payload.get("schema_version") != "pol-initial-condition-archive-v4":
         raise ValueError(
-            "unsupported initial-condition archive schema; P0-03 requires v3"
+            "unsupported initial-condition archive schema; P0-04 requires v4"
         )
+    verify_execution_device_policy(
+        payload,
+        boundary="master initial-condition archive",
+    )
+    require_cpu_tensors(
+        payload,
+        boundary="master initial-condition archive verification",
+        name="master",
+    )
     sample_ids = payload.get("sample_ids")
     values = payload.get("values")
     fourier = payload.get("fourier")
@@ -588,6 +660,12 @@ def _validate_master_payload_against_spec(
             )
     if metadata.get("dtype") != spec.samples.dtype:
         raise ValueError("initial-condition archive metadata dtype mismatch")
+    if metadata.get("device") != "cpu":
+        raise ValueError("initial-condition archive metadata device must be cpu")
+    verify_execution_device_policy(
+        metadata,
+        boundary="master initial-condition archive metadata",
+    )
     if stable_object_hash(metadata.get("domain_length")) != stable_object_hash(
         float(spec.domain.length)
     ):
@@ -602,7 +680,8 @@ def _master_archive_binding(payload: dict[str, Any]) -> dict[str, Any]:
         for name in ("sample_ids", "values", "fourier")
     }
     identity = {
-        "schema_version": "pol-master-initial-condition-binding-v2",
+        "schema_version": "pol-master-initial-condition-binding-v3",
+        **execution_device_policy(),
         "archive_schema_version": payload["schema_version"],
         "nx": int(payload["nx"]),
         "total_samples": int(payload["sample_ids"].numel()),
@@ -635,7 +714,8 @@ def _foundation_contract(
     }
     samples = spec.samples
     return {
-        "schema_version": "pol-validation-foundation-contract-v2",
+        "schema_version": "pol-validation-foundation-contract-v3",
+        **execution_device_policy(),
         "domain_length": float(spec.domain.length),
         "grf_sampler_domain_length": float(
             master_payload["metadata"]["domain_length"]
@@ -794,7 +874,8 @@ def _certificate_payload(
     if overall == "pass":
         _validate_target_reference_contract(target_reference)
     return {
-        "schema_version": "pol-validation-certificate-v3",
+        "schema_version": "pol-validation-certificate-v4",
+        **execution_device_policy(),
         "status": overall,
         "name": spec.name,
         "profile": spec.profile,
@@ -808,8 +889,6 @@ def _certificate_payload(
 
 
 def run_validation(spec: ValidationSpec, *, force: bool = False) -> ValidationOutcome:
-    if spec.samples.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested by validation spec but unavailable")
     max_nx = max(int(value) for value in spec.reference_nx_candidates)
     ic = spec.samples.initial_condition
     archive = generate_grf_archive(
@@ -823,6 +902,11 @@ def run_validation(spec: ValidationSpec, *, force: bool = False) -> ValidationOu
         domain_length=spec.domain.length,
         dtype=spec.samples.dtype,
         device=spec.samples.device,
+    )
+    require_cpu_tensors(
+        archive.__dict__,
+        boundary="validation workflow input",
+        name="initial_conditions",
     )
     checks = {
         "periodic_resampling": _resampling_checks(spec),

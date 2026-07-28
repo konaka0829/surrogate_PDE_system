@@ -10,6 +10,7 @@ from pol.data.finite import derive_finite_view
 from pol.learning.metrics import fourier_prediction_metrics
 from pol.learning.observations import observe_equispaced_periodic
 from pol.learning.ridge import l2_synthesis_matrix
+from pol.runtime.device import require_cpu_tensor, require_cpu_tensors
 from pol.systems.heat import heat_multiplier_vector
 from .cache import FeatureStateCache
 from .trial import predict_frozen
@@ -33,6 +34,11 @@ def heat_multiplier_rows(
         return []
     if evolution.system.kind != "heat":
         return []
+    require_cpu_tensors(
+        model,
+        boundary="heat-multiplier diagnostic model",
+        name="model",
+    )
     q = int(trial.output.q)
     J = int(trial.feature.observation.J)
     synthesis = l2_synthesis_matrix(
@@ -52,6 +58,11 @@ def heat_multiplier_rows(
         domain_length=dataset.domain_length,
         dtype=effective.dtype,
         device=effective.device,
+    )
+    require_cpu_tensors(
+        {"effective": effective, "ideal": ideal},
+        boundary="heat-multiplier diagnostic",
+        name="multipliers",
     )
     rows: list[dict[str, Any]] = []
     for index in range(q):
@@ -87,6 +98,11 @@ def noise_robustness_rows(
     case_id: str,
     readout_id: str,
 ) -> list[dict[str, Any]]:
+    require_cpu_tensors(
+        model,
+        boundary="noise diagnostic frozen model",
+        name="model",
+    )
     ids = dataset.test_ids.to(torch.long)
     inputs, targets = dataset.tensors_for(ids)
     finite = derive_finite_view(
@@ -104,6 +120,17 @@ def noise_robustness_rows(
         domain_length=dataset.domain_length,
         l2_scale=trial.feature.observation.l2_scale,
     )
+    require_cpu_tensors(
+        {
+            "inputs": inputs,
+            "targets": targets,
+            "state": state.values,
+            "features": features,
+            "finite": finite.__dict__,
+        },
+        boundary="noise diagnostic inputs",
+        name="diagnostic",
+    )
     rms = torch.sqrt(features.square().mean()).clamp_min(torch.finfo(features.dtype).eps)
     rows: list[dict[str, Any]] = []
     for level_index, level in enumerate(diagnostic.levels):
@@ -117,7 +144,12 @@ def noise_robustness_rows(
                 generator=generator,
                 dtype=features.dtype,
                 device="cpu",
-            ).to(features.device)
+            )
+            require_cpu_tensor(
+                noise,
+                boundary="noise diagnostic generation",
+                name="noise",
+            )
             noisy = features + float(level) * rms * noise
             predictions = predict_frozen(
                 model,

@@ -1,4 +1,4 @@
-# Known scientific risks at Phase P0-03
+# Known scientific risks at Phase P0-04
 
 Status terms in this document have strict meanings:
 
@@ -121,9 +121,10 @@ main artifacts were not executed or retrospectively certified in this phase.
 
 ## R4. Device configuration is not end-to-end
 
-**Status: confirmed.**
+**Status: resolved for the first-paper workflow in P0-04 by narrowing the
+validated scope to CPU-only; GPU support remains unimplemented.**
 
-Relevant code:
+Earlier behavior:
 
 - `pol/config/models.py::SampleSpec`
 - `pol/data/initial_conditions.py::resolve_device` and
@@ -139,10 +140,41 @@ end-to-end device policy, so feature-state solves subsequently operate on the
 CPU-loaded tensors. Some algebraic validation checks also explicitly construct
 CPU tensors regardless of `SampleSpec.device`.
 
-**Potential impact:** requesting CUDA does not mean that validation, target
+The resulting risk was that requesting CUDA did not mean that validation, target
 dataset generation, feature generation, fitting, and evaluation all use CUDA
 consistently. Device-dependent reproducibility/performance claims and metadata
-can therefore be misleading. Current checked-in profiles request CPU.
+could therefore be misleading. Checked-in profiles requested CPU.
+
+P0-04 resolution:
+
+- `SampleSpec.device` now defaults to and accepts only `"cpu"` under public
+  validation schema `pol-validation-v3`. `"cuda"`, `"auto"`, and unknown
+  values fail at configuration loading regardless of CUDA availability.
+- `resolve_device` maps only `"cpu"` and contains no availability-dependent
+  branch.
+- `pol.runtime.device` defines the canonical
+  `execution_device_policy="cpu_only"` and `compute_device="cpu"` contract.
+  Validation, dataset binding and metadata, feature-state artifacts, frozen
+  models, and study identity/summary store hashed copies. Verifiers reject a
+  missing or altered policy.
+- Natural high-level boundaries validate CPU tensors before and after
+  validation solves, dataset target batches, feature solves, readout fitting,
+  frozen-model read-back, test evaluation, and diagnostics. Publication keeps
+  established `detach().cpu()` serialization only after checking that the
+  upstream official result is already CPU.
+- Validation, dataset, feature-state, and study artifact schemas were revised,
+  and package version `0.2.4` plus numerical-environment schema `v2` prevent
+  older artifacts from being reused as though they carried this guarantee.
+- A fixed tiny CPU archive regression confirms unchanged values and Fourier
+  coefficients for the pre-P0-04 seed and configuration.
+
+**Residual caveat:** P0-04 does not implement end-to-end GPU execution,
+CPU/GPU equivalence testing, GPU cache/serialization provenance, mixed
+precision, or distributed execution. Low-level kernels may still preserve the
+device of directly supplied tensors, but that behavior is outside the official
+artifact workflow and must not be described as validated GPU support. A
+non-null `torch_cuda_version` identifies the PyTorch build only; it does not
+change the recorded CPU compute policy.
 
 ## R5. Fixed Fourier decoder silently zero-pads unobservable coefficients
 
@@ -168,6 +200,7 @@ general `q <= J` or `n_tar <= J` constraint.
 
 - The authoritative historical mapping from E0--E7 or Figure numbers to the
   current question-based studies is absent from this repository.
-- No main profile was run in P0-00, so the realized magnitude of any risk on
-  production-resolution results was not measured.
+- No main profile was run in P0-04, so this phase establishes the CPU execution
+  contract using focused tests and checked-in smoke profiles rather than new
+  production-resolution results.
 - This inventory does not establish cross-device numerical equivalence.

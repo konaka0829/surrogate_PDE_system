@@ -13,7 +13,13 @@ from pol.data.dataset import ReferenceDataset
 from pol.data.finite import build_feature_initial_state
 from pol.math.periodic import spectral_resample_periodic
 from pol.runtime.environment import numerical_environment_fingerprint
-from pol.runtime.hashing import tensor_sha256
+from pol.runtime.device import (
+    execution_device_policy,
+    require_cpu_tensor,
+    require_cpu_tensors,
+    verify_execution_device_policy,
+)
+from pol.runtime.hashing import stable_object_hash, tensor_sha256
 from pol.runtime.io import atomic_torch_save, write_strict_json
 from pol.systems.registry import evolve
 
@@ -50,9 +56,19 @@ class FeatureStateCache:
         sample_ids: torch.Tensor,
         trial: TrialSpec,
     ) -> dict[str, Any]:
+        require_cpu_tensor(
+            sample_ids,
+            boundary="feature-state cache identity",
+            name="sample_ids",
+        )
+        verify_execution_device_policy(
+            dataset.__dict__,
+            boundary="feature-state dataset input",
+        )
         evolution = trial.feature.evolution
         return {
-            "schema_version": "pol-feature-state-identity-v1",
+            "schema_version": "pol-feature-state-identity-v2",
+            **execution_device_policy(),
             "environment": numerical_environment_fingerprint(),
             "dataset_artifact_id": dataset.artifact_id,
             "sample_ids": [int(value) for value in sample_ids.tolist()],
@@ -81,13 +97,58 @@ class FeatureStateCache:
             self.hits += 1
             return self.memory[ref.artifact_id]
         if self.enabled and self.store.exists(ref):
+            manifest = verify_artifact(ref.path)
+            stored_identity = manifest.get("identity")
+            if not isinstance(stored_identity, dict):
+                raise ValueError("cached feature-state identity must be an object")
+            verify_execution_device_policy(
+                stored_identity,
+                boundary="feature-state artifact identity",
+            )
+            environment = stored_identity.get("environment")
+            if not isinstance(environment, dict):
+                raise ValueError(
+                    "cached feature-state numerical environment is missing"
+                )
+            verify_execution_device_policy(
+                environment,
+                boundary="feature-state numerical environment",
+            )
+            if stable_object_hash(stored_identity) != stable_object_hash(identity):
+                raise ValueError("cached feature-state request identity mismatch")
+            identity_doc = json.loads(
+                (ref.path / "identity.json").read_text(encoding="utf-8")
+            )
+            if stable_object_hash(identity_doc) != stable_object_hash(
+                stored_identity
+            ):
+                raise ValueError(
+                    "cached feature-state identity document mismatch"
+                )
             payload = torch.load(
                 ref.path / "state.pt", map_location="cpu", weights_only=True
             )
-            if payload.get("schema_version") != "pol-feature-state-v1":
+            if payload.get("schema_version") != "pol-feature-state-v2":
                 raise ValueError("unsupported feature-state cache schema")
             metadata_doc = json.loads(
                 (ref.path / "metadata.json").read_text(encoding="utf-8")
+            )
+            if metadata_doc.get("schema_version") != (
+                "pol-feature-state-metadata-v2"
+            ):
+                raise ValueError("unsupported feature-state metadata schema")
+            verify_execution_device_policy(
+                payload,
+                boundary="feature-state archive",
+            )
+            verify_execution_device_policy(
+                metadata_doc,
+                boundary="feature-state metadata",
+            )
+            require_cpu_tensors(
+                payload,
+                boundary="feature-state cache load",
+                name="state",
             )
             if payload.get("cache_id") != ref.artifact_id:
                 raise ValueError("cached feature-state identity mismatch")
@@ -113,6 +174,10 @@ class FeatureStateCache:
                 raise ValueError("cached feature-state dtype does not match dataset")
             if metadata_doc.get("solver") != payload.get("metadata"):
                 raise ValueError("cached feature-state solver metadata mismatch")
+            if payload.get("metadata", {}).get("device") != "cpu":
+                raise ValueError(
+                    "cached feature-state solver metadata must report device=cpu"
+                )
             if metadata_doc.get("tensor_hashes") != hashes:
                 raise ValueError("cached feature-state metadata hash mismatch")
             state = FeatureState(
@@ -131,7 +196,17 @@ class FeatureStateCache:
         evolution = trial.feature.evolution
         for start in range(0, int(sample_ids.numel()), self.batch_size):
             batch_ids = sample_ids[start : start + self.batch_size]
+            require_cpu_tensor(
+                batch_ids,
+                boundary="feature-state solve batch",
+                name="sample_ids",
+            )
             inputs_reference, _ = dataset.tensors_for(batch_ids)
+            require_cpu_tensor(
+                inputs_reference,
+                boundary="feature-state solve dataset input",
+                name="inputs_reference",
+            )
             finite_inputs = spectral_resample_periodic(
                 inputs_reference,
                 int(trial.input.n_tar),
@@ -141,6 +216,11 @@ class FeatureStateCache:
                 finite_inputs,
                 n_sur=int(trial.feature.n_sur),
                 domain_length=dataset.domain_length,
+            )
+            require_cpu_tensor(
+                initial,
+                boundary="feature-state solve initial state",
+                name="initial",
             )
             if trial.feature.kind == "static_input":
                 batch_values = initial
@@ -160,6 +240,15 @@ class FeatureStateCache:
                     evolution.model_dump(mode="json"),
                     domain_length=dataset.domain_length,
                 )
+            require_cpu_tensor(
+                batch_values,
+                boundary="feature-state solve result",
+                name="values",
+            )
+            if batch_metadata.get("device") != "cpu":
+                raise RuntimeError(
+                    "feature-state solver metadata must report device=cpu"
+                )
             batches.append(batch_values.detach().cpu())
             if metadata is None:
                 metadata = batch_metadata
@@ -169,7 +258,8 @@ class FeatureStateCache:
             raise ValueError("feature-state solve requires at least one sample")
         values = torch.cat(batches, dim=0)
         payload = {
-            "schema_version": "pol-feature-state-v1",
+            "schema_version": "pol-feature-state-v2",
+            **execution_device_policy(),
             "cache_id": ref.artifact_id,
             "sample_ids": sample_ids.detach().cpu().clone(),
             "values": values.detach().cpu(),
@@ -179,6 +269,11 @@ class FeatureStateCache:
             "sample_ids": tensor_sha256(payload["sample_ids"]),
             "values": tensor_sha256(payload["values"]),
         }
+        require_cpu_tensors(
+            payload,
+            boundary="feature-state archive publication",
+            name="state",
+        )
 
         if self.enabled:
             def writer(root: Path) -> Iterable[str]:
@@ -186,7 +281,8 @@ class FeatureStateCache:
                 write_strict_json(
                     root / "metadata.json",
                     {
-                        "schema_version": "pol-feature-state-metadata-v1",
+                        "schema_version": "pol-feature-state-metadata-v2",
+                        **execution_device_policy(),
                         "cache_id": ref.artifact_id,
                         "solver": metadata,
                         "tensor_hashes": payload["tensor_hashes"],

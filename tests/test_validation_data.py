@@ -71,12 +71,12 @@ def test_nonunit_domain_is_bound_across_grf_archive_and_certificate(
     foundation = outcome.certificate["foundation_contract"]
     master_binding = foundation["master_initial_conditions"]
 
-    assert manifest["identity"]["schema_version"] == "pol-validation-identity-v3"
-    assert master["schema_version"] == "pol-initial-condition-archive-v3"
-    assert outcome.certificate["schema_version"] == "pol-validation-certificate-v3"
-    assert foundation["schema_version"] == "pol-validation-foundation-contract-v2"
+    assert manifest["identity"]["schema_version"] == "pol-validation-identity-v4"
+    assert master["schema_version"] == "pol-initial-condition-archive-v4"
+    assert outcome.certificate["schema_version"] == "pol-validation-certificate-v4"
+    assert foundation["schema_version"] == "pol-validation-foundation-contract-v3"
     assert master_binding["schema_version"] == (
-        "pol-master-initial-condition-binding-v2"
+        "pol-master-initial-condition-binding-v3"
     )
     assert resolved["domain"]["length"] == 2.0
     assert manifest["identity"]["spec"]["domain"]["length"] == 2.0

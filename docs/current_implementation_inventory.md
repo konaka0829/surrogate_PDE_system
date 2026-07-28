@@ -1,6 +1,6 @@
 # Current implementation inventory
 
-This inventory describes the code present at Phase P0-03. It is a
+This inventory describes the code present at Phase P0-04. It is a
 characterization of the current implementation, not a claim that every
 implemented behavior is scientifically final.
 
@@ -38,6 +38,34 @@ Certificate loading reconstructs these contracts from the content-addressed
 resolved specification, checks, and master archive. Missing or contradictory
 fields, inconsistent selected indices, altered allowed suffixes, and legacy
 certificate/archive revisions are rejected.
+
+## Execution device policy
+
+The public first-paper artifact workflow is CPU-only. Validation schema
+`pol-validation-v3` accepts only `samples.device="cpu"` and rejects CUDA,
+automatic selection, and unknown devices before execution, independently of
+`torch.cuda.is_available()`.
+
+`pol.runtime.device` is the single source of truth for
+`execution_device_policy="cpu_only"` and `compute_device="cpu"`. These values
+are recorded in the numerical environment, validation identity/certificate
+and foundation/master contracts, dataset binding proof/identity/metadata,
+feature-state identity/metadata/archive, frozen model and evaluation records,
+and study identity/summary. They participate in content hashes and are checked
+on read-back. `torch_cuda_version`, when present, describes only the installed
+PyTorch build.
+
+Official boundaries reject a non-CPU tensor rather than silently moving it:
+validation checks and reference solves, master publication, dataset target
+batches and loaded tensors, feature-state solves/cache, readout fitting,
+frozen-model publication/read-back, test evaluation, convergence and
+diagnostics. Existing `detach().cpu()` calls remain the serialization contract
+after the producing boundary has already proved CPU placement.
+
+The low-level Fourier, resampling, solver, observation, and learning algebra
+continues to preserve input-device generality where implemented. It is not an
+end-to-end GPU workflow and carries no GPU artifact or reproducibility
+guarantee.
 
 ## Data
 
@@ -171,18 +199,20 @@ results and do not receive placeholder seed uncertainty.
 - Completed-run verification checks frozen random-feature seed membership,
   recomputes primary mean/standard-deviation/confidence-interval fields from
   per-seed rows, and checks the separate ensemble row and member count.
-- P0-02 study-run identity, manifest, summary, selection, frozen-plan, and
-  frozen-model schemas use `v3`. `dataset_reference.json` stores the full proof
-  and downstream summaries carry its kind/status/target status/hash. P0-01
-  `v2` and older run manifests are rejected explicitly.
-- P0-03 validation identity/certificate and initial-condition/dataset archives
-  use `v3`; foundation/master bindings and dataset binding proofs use `v2`.
-  Their identities exclude storage roots, include the sampler semantics and
-  configured domain, and reject P0-02 artifacts under the new GRF semantics.
+- P0-04 study-run identity, manifest, summary, selection, frozen-plan, and
+  frozen-model schemas use `v4`; `dataset_reference.json` uses `v3`.
+  Validation identity/certificate and initial-condition/dataset artifacts use
+  `v4`; foundation/master bindings and dataset binding proofs use `v3`;
+  feature-state identity/archive/metadata use `v2`.
+- Numerical-environment schema `pol-numerical-environment-v2` and package
+  version `0.2.4` join these artifact revisions in preventing pre-P0-04
+  artifacts from being interpreted as CPU-guaranteed. The earlier sampler,
+  domain, target-reference binding, and frozen-test proof semantics remain
+  content-hash inputs.
 - Plot-only regeneration requires an existing verified run and is
   transactional.
 
-## P0-00 characterization baseline and P0-01/P0-02/P0-03 extensions
+## P0-00 characterization baseline and P0-01/P0-02/P0-03/P0-04 extensions
 
 The following small deterministic tests fix the behaviors requested for this
 phase. No solver or metric implementation was changed to establish them.
@@ -199,16 +229,18 @@ phase. No solver or metric implementation was changed to establish them.
 | certificate/dataset target-reference binding | `tests/test_dataset_binding.py`, including exact candidate suffix membership, all target-condition mismatch classes, pre-evolution rejection, heat foundation-only status, and dataset/study tamper checks |
 | physical-domain GRF covariance and `L=1` regression | `tests/test_numerics.py::test_grf_unit_domain_output_matches_pre_p0_03_regression`, `test_grf_mode_amplitudes_follow_physical_domain_scaling`, and `test_grf_even_grid_nyquist_uses_physical_wavenumber` |
 | GRF domain provenance and tamper rejection | `tests/test_validation_data.py::test_nonunit_domain_is_bound_across_grf_archive_and_certificate` and the sampler-domain proof/certificate tamper tests in `tests/test_dataset_binding.py` |
+| CPU-only configuration, boundary placement, provenance, and tamper rejection | `tests/test_device_policy.py`, covering CPU/default acceptance; CUDA/auto rejection under both mocked availability states; no CUDA availability query in resolution; CPU master/dataset/feature/frozen tensors; environment, certificate, proof, identity, and summary policy copies; binding-proof and study-summary policy tamper; and a non-CPU boundary error |
+| P0-04 CPU numerical preservation | `tests/test_device_policy.py::test_p0_04_cpu_deterministic_archive_regression`, which fixes exact tensor hashes for the pre-P0-04 tiny seed/configuration; the pre-existing unit-domain regression and feature-state batching-invariance test remain in force |
 
-## Missing or incomplete after P0-03
+## Missing or incomplete after P0-04
 
 The following are not implemented or are incomplete; they are not repaired in
 this phase:
 
 - heat profiles have no target-specific convergence certificate and therefore
   remain explicitly `foundation_only`;
-- device selection is not propagated as an end-to-end dataset/study execution
-  policy;
+- end-to-end CUDA/GPU execution, GPU artifact provenance, CPU/GPU numerical
+  equivalence, mixed precision, and distributed execution are not implemented;
 - the fixed decoder silently zero-pads requested coefficients outside the
   point-observation bandwidth;
 - there are no checked-in study specifications corresponding to the currently

@@ -45,9 +45,19 @@ class SampleSpec(StrictModel):
     n_test: int = Field(ge=0)
     seed: int = 0
     dtype: Literal["float32", "float64"] = "float64"
-    device: Literal["cpu", "cuda", "auto"] = "cpu"
+    device: Literal["cpu"] = "cpu"
     initial_condition: GRFSpec = Field(default_factory=GRFSpec)
     preprocessing: Literal["l2_scaling_only"] = "l2_scaling_only"
+
+    @field_validator("device", mode="before")
+    @classmethod
+    def _cpu_only_device(cls, value: object) -> object:
+        if value != "cpu":
+            raise ValueError(
+                "official scientific workflows are CPU-only; device must be "
+                "'cpu' (CUDA, auto selection, and unknown devices are unsupported)"
+            )
+        return value
 
     @model_validator(mode="after")
     def _counts(self) -> "SampleSpec":
@@ -174,7 +184,7 @@ class ReducedObservationSpec(StrictModel):
 
 
 class ValidationSpec(StrictModel):
-    schema_version: Literal["pol-validation-v2"] = "pol-validation-v2"
+    schema_version: Literal["pol-validation-v3"] = "pol-validation-v3"
     name: str
     artifact_root: Path = Path("artifacts")
     profile: str = "smoke"

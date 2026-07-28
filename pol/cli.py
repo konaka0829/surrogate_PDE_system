@@ -25,15 +25,25 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     validate = commands.add_parser(
-        "validate", help="validate numerical foundations and publish a certificate"
+        "validate",
+        help=(
+            "validate numerical foundations on CPU and publish a CPU-only "
+            "certificate"
+        ),
     )
-    validate.add_argument("spec", help="path to a pol-validation-v2 JSON spec")
+    validate.add_argument(
+        "spec",
+        help="path to a CPU-only pol-validation-v3 JSON spec",
+    )
     validate.add_argument("--force", action="store_true")
 
     data = commands.add_parser("data", help="reference-dataset operations")
     data_commands = data.add_subparsers(dest="data_command", required=True)
     build = data_commands.add_parser(
-        "build", help="build or reuse an explicitly validation-bound reference dataset"
+        "build",
+        help=(
+            "build or reuse an explicitly validation-bound CPU reference dataset"
+        ),
     )
     build.add_argument(
         "spec",
@@ -44,7 +54,8 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--force", action="store_true")
 
     run = commands.add_parser(
-        "run", help="run a study; a scalar run is a one-cell study"
+        "run",
+        help="run a CPU-only study; a scalar run is a one-cell study",
     )
     run.add_argument("spec", help="path to a pol-study-v1 JSON spec")
     modes = run.add_mutually_exclusive_group()
@@ -144,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             if schema == "pol-artifact-manifest-v1":
                 manifest = verify_artifact(path)
                 kind = "artifact"
-            elif schema == "pol-study-run-manifest-v3":
+            elif schema == "pol-study-run-manifest-v4":
                 manifest = verify_study_run(path)
                 kind = "study_run"
             else:

@@ -67,10 +67,14 @@ def _prepare_paths(
 def _load(model: type[T], path: str | Path, *, repo_root: Path, kind: str) -> T:
     raw = _read(path)
     schema_version = raw.get("schema_version")
-    if kind == "validation" and schema_version == "pol-validation-v1":
+    if kind == "validation" and schema_version in {
+        "pol-validation-v1",
+        "pol-validation-v2",
+    }:
         raise ValueError(
-            "unsupported legacy validation schema pol-validation-v1; "
-            "migrate to pol-validation-v2 and regenerate the certificate"
+            f"unsupported legacy validation schema {schema_version}; "
+            "migrate to pol-validation-v3 with samples.device='cpu' and "
+            "regenerate the certificate"
         )
     if kind == "dataset" and schema_version == "pol-dataset-v1":
         raise ValueError(

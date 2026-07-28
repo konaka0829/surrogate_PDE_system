@@ -10,6 +10,7 @@ from pol.data.dataset import ReferenceDataset
 from pol.learning.metrics import compare_fields_on_common_grid
 from pol.learning.observations import observe_equispaced_periodic
 from pol.math.fourier import real_fourier_synthesis
+from pol.runtime.device import require_cpu_tensors
 from .cache import FeatureStateCache
 from .overrides import apply_trial_overrides
 from .trial import predict_frozen
@@ -37,6 +38,11 @@ def check_convergence(
     model: Mapping[str, Any],
     spec: ConvergenceSpec,
 ) -> ConvergenceOutcome:
+    require_cpu_tensors(
+        model,
+        boundary="surrogate-resolution diagnostic model",
+        name="model",
+    )
     configured_ids = torch.tensor(spec.sample_ids, dtype=torch.long)
     selection_ids = set(torch.cat([dataset.train_ids, dataset.validation_ids]).tolist())
     forbidden = [int(value) for value in configured_ids.tolist() if int(value) not in selection_ids]
@@ -79,6 +85,16 @@ def check_convergence(
             coefficients,
             int(refined.input.n_tar),
             domain_length=dataset.domain_length,
+        )
+        require_cpu_tensors(
+            {
+                "state": state.values,
+                "features": phi,
+                "coefficients": coefficients,
+                "field": field,
+            },
+            boundary="surrogate-resolution diagnostic",
+            name=f"n_sur_{n_sur}",
         )
         valid_n_sur.append(int(n_sur))
         states.append(state.values)

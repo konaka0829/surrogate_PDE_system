@@ -21,6 +21,11 @@ from pol.config.models import (
 from pol.data.dataset import ensure_dataset
 from pol.plotting.reporters import generate_reporters
 from pol.runtime.artifacts import RunTransaction, manifest_records
+from pol.runtime.device import (
+    execution_device_policy,
+    require_cpu_tensors,
+    verify_execution_device_policy,
+)
 from pol.runtime.environment import numerical_environment_fingerprint
 from pol.runtime.hashing import stable_object_hash, tensor_sha256
 from pol.runtime.io import atomic_torch_save, file_sha256, write_csv, write_strict_json
@@ -220,7 +225,7 @@ def _run_manifest(root: Path, *, identity: Mapping[str, Any]) -> None:
     write_strict_json(
         root / "manifest.json",
         {
-            "schema_version": "pol-study-run-manifest-v3",
+            "schema_version": "pol-study-run-manifest-v4",
             "identity": dict(identity),
             "files": manifest_records(root, names),
         },
@@ -264,8 +269,19 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     identity = manifest.get("identity")
     if not isinstance(identity, Mapping):
         raise ValueError("study-run identity must be an object")
-    if identity.get("schema_version") != "pol-study-run-identity-v3":
+    if identity.get("schema_version") != "pol-study-run-identity-v4":
         raise ValueError("unsupported legacy study-run identity")
+    verify_execution_device_policy(
+        identity,
+        boundary="study-run identity",
+    )
+    environment = identity.get("environment")
+    if not isinstance(environment, Mapping):
+        raise ValueError("study-run numerical environment is missing")
+    verify_execution_device_policy(
+        environment,
+        boundary="study-run numerical environment",
+    )
     run_hash = stable_object_hash(dict(identity))
     resolved_study = json.loads(
         (root / "resolved_study.json").read_text(encoding="utf-8")
@@ -274,8 +290,12 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError("resolved study does not match manifest identity")
 
     summary = json.loads((root / "run_summary.json").read_text(encoding="utf-8"))
-    if summary.get("schema_version") != "pol-study-run-summary-v3":
+    if summary.get("schema_version") != "pol-study-run-summary-v4":
         raise ValueError("unsupported study-run summary schema")
+    verify_execution_device_policy(
+        summary,
+        boundary="study-run summary",
+    )
     if summary.get("run_hash") != run_hash:
         raise ValueError("study-run summary hash does not match manifest identity")
     if summary.get("study") != resolved_study.get("name"):
@@ -286,8 +306,12 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     selection = json.loads(
         (root / "selection_record.json").read_text(encoding="utf-8")
     )
-    if selection.get("schema_version") != "pol-selection-record-v3":
+    if selection.get("schema_version") != "pol-selection-record-v4":
         raise ValueError("unsupported selection-record schema")
+    verify_execution_device_policy(
+        selection,
+        boundary="selection record",
+    )
     _assert_selection_record_safe(selection)
     if selection.get("test_data_used") is not False:
         raise ValueError("selection record is not test-isolated")
@@ -298,8 +322,12 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     plan = json.loads(
         (root / "frozen_evaluation_plan.json").read_text(encoding="utf-8")
     )
-    if plan.get("schema_version") != "pol-frozen-evaluation-plan-v3":
+    if plan.get("schema_version") != "pol-frozen-evaluation-plan-v4":
         raise ValueError("unsupported frozen evaluation plan schema")
+    verify_execution_device_policy(
+        plan,
+        boundary="frozen evaluation plan",
+    )
     stored_plan_hash = plan.pop("plan_content_hash", None)
     computed_plan_hash = stable_object_hash(plan)
     plan["plan_content_hash"] = stored_plan_hash
@@ -319,8 +347,12 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     )
     if not isinstance(dataset_reference, Mapping):
         raise ValueError("study dataset reference must be an object")
-    if dataset_reference.get("schema_version") != "pol-study-dataset-reference-v2":
+    if dataset_reference.get("schema_version") != "pol-study-dataset-reference-v3":
         raise ValueError("unsupported study dataset-reference schema")
+    verify_execution_device_policy(
+        dataset_reference,
+        boundary="study dataset reference",
+    )
     dataset_binding_proof = dataset_reference.get("binding_proof")
     if not isinstance(dataset_binding_proof, Mapping):
         raise ValueError("study dataset reference has no binding proof")
@@ -345,6 +377,10 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
                 raise ValueError(
                     f"{source_name} dataset validation binding mismatch: {field}"
                 )
+        verify_execution_device_policy(
+            source,
+            boundary=source_name,
+        )
     if identity.get("dataset_artifact_id") != dataset_reference.get("artifact_id"):
         raise ValueError("manifest dataset binding mismatch")
     if identity.get("dataset_split_hash") != dataset_reference.get("split_hash"):
@@ -367,8 +403,17 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     if file_sha256(model_path) != plan.get("frozen_models_sha256"):
         raise ValueError("frozen model archive hash mismatch")
     archive = torch.load(model_path, map_location="cpu", weights_only=True)
-    if archive.get("schema_version") != "pol-frozen-model-archive-v3":
+    if archive.get("schema_version") != "pol-frozen-model-archive-v4":
         raise ValueError("unsupported frozen model archive schema")
+    verify_execution_device_policy(
+        archive,
+        boundary="frozen model archive",
+    )
+    require_cpu_tensors(
+        archive,
+        boundary="frozen model archive load",
+        name="archive",
+    )
     if archive.get("selection_record_hash") != selection_hash:
         raise ValueError("frozen model archive selection binding mismatch")
     models = archive.get("models")
@@ -630,7 +675,7 @@ def verify_study_run(path: Path | str) -> dict[str, Any]:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise ValueError("study run has no manifest")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "pol-study-run-manifest-v3":
+    if manifest.get("schema_version") != "pol-study-run-manifest-v4":
         raise ValueError("unsupported study-run manifest")
     expected_records = manifest.get("files")
     if not isinstance(expected_records, list):
@@ -746,12 +791,29 @@ def run_study(
         torch.set_num_threads(int(spec.execution.torch_threads))
     dataset_spec = load_dataset_spec(spec.dataset_spec, repo_root=repo_root)
     dataset = ensure_dataset(dataset_spec, repo_root=repo_root, force=False)
+    verify_execution_device_policy(
+        dataset.__dict__,
+        boundary="study dataset",
+    )
+    require_cpu_tensors(
+        {
+            "sample_ids": dataset.sample_ids,
+            "inputs_reference": dataset.inputs_reference,
+            "targets_reference": dataset.targets_reference,
+            "train_ids": dataset.train_ids,
+            "validation_ids": dataset.validation_ids,
+            "test_ids": dataset.test_ids,
+        },
+        boundary="study dataset",
+        name="dataset",
+    )
     if dataset.validation_ids.numel() == 0 or dataset.test_ids.numel() == 0:
         raise ValueError(
             "operator-learning studies require nonempty validation and test splits"
         )
     identity = {
-        "schema_version": "pol-study-run-identity-v3",
+        "schema_version": "pol-study-run-identity-v4",
+        **execution_device_policy(),
         "environment": numerical_environment_fingerprint(),
         "study": _scientific_spec(spec),
         "dataset_artifact_id": dataset.artifact_id,
@@ -888,7 +950,8 @@ def run_study(
         )
 
     selection_record = {
-        "schema_version": "pol-selection-record-v3",
+        "schema_version": "pol-selection-record-v4",
+        **execution_device_policy(),
         "study": spec.name,
         "profile": spec.profile,
         "dataset_artifact_id": dataset.artifact_id,
@@ -929,10 +992,16 @@ def run_study(
                 "model": evaluation.frozen_models[readout_id],
             }
     frozen_archive = {
-        "schema_version": "pol-frozen-model-archive-v3",
+        "schema_version": "pol-frozen-model-archive-v4",
+        **execution_device_policy(),
         "selection_record_hash": selection_hash,
         "models": frozen_models,
     }
+    require_cpu_tensors(
+        frozen_archive,
+        boundary="frozen model archive publication",
+        name="archive",
+    )
 
     transaction = RunTransaction(final_dir)
     staging = transaction.begin()
@@ -942,7 +1011,8 @@ def run_study(
         write_strict_json(
             staging / "dataset_reference.json",
             {
-                "schema_version": "pol-study-dataset-reference-v2",
+                "schema_version": "pol-study-dataset-reference-v3",
+                **execution_device_policy(),
                 "artifact_id": dataset.artifact_id,
                 "split_hash": dataset.split_hash,
                 "validation_artifact_id": dataset.validation_artifact_id,
@@ -972,7 +1042,8 @@ def run_study(
         atomic_torch_save(staging / "frozen_models.pt", frozen_archive)
         model_file_hash = file_sha256(staging / "frozen_models.pt")
         frozen_plan = {
-            "schema_version": "pol-frozen-evaluation-plan-v3",
+            "schema_version": "pol-frozen-evaluation-plan-v4",
+            **execution_device_policy(),
             "study": spec.name,
             "dataset_artifact_id": dataset.artifact_id,
             "dataset_split_hash": dataset.split_hash,
@@ -1014,6 +1085,10 @@ def run_study(
             raise ValueError("frozen plan read-back hash mismatch")
         if loaded_plan.get("dataset_artifact_id") != dataset.artifact_id:
             raise ValueError("frozen plan dataset binding mismatch")
+        verify_execution_device_policy(
+            loaded_plan,
+            boundary="frozen evaluation plan read-back",
+        )
         if loaded_plan.get("dataset_split_hash") != dataset.split_hash:
             raise ValueError("frozen plan split binding mismatch")
         if loaded_plan.get("dataset_binding_kind") != dataset.binding_kind:
@@ -1041,8 +1116,17 @@ def run_study(
             map_location="cpu",
             weights_only=True,
         )
-        if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v3":
+        if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v4":
             raise ValueError("unsupported frozen model archive schema")
+        verify_execution_device_policy(
+            loaded_archive,
+            boundary="frozen model archive read-back",
+        )
+        require_cpu_tensors(
+            loaded_archive,
+            boundary="frozen model archive read-back",
+            name="archive",
+        )
         if loaded_archive.get("selection_record_hash") != selection_hash:
             raise ValueError("frozen model archive selection binding mismatch")
         events.append({"event": "freeze_read_back", "plan_content_hash": frozen_plan_hash})
@@ -1171,7 +1255,8 @@ def run_study(
                 output_dir=staging / "figures",
             )
         summary = {
-            "schema_version": "pol-study-run-summary-v3",
+            "schema_version": "pol-study-run-summary-v4",
+            **execution_device_policy(),
             "status": "pass",
             "study": spec.name,
             "profile": spec.profile,

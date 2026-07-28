@@ -14,6 +14,7 @@ from pol.data.dataset import ReferenceDataset
 from pol.numerics.initial_conditions import GRF_SAMPLER_SEMANTICS
 from pol.plotting.reporters import generate_reporters
 from pol.study.trial import TrialEngine, summarize_independent_seed_metrics
+from pol.runtime.device import execution_device_policy
 
 
 @pytest.mark.parametrize(
@@ -99,7 +100,8 @@ def _synthetic_trial_and_dataset() -> tuple[TrialSpec, ReferenceDataset]:
         binding_status="pass",
         target_reference_validation_status="not_claimed",
         binding_proof={
-            "schema_version": "pol-dataset-binding-proof-v2",
+            "schema_version": "pol-dataset-binding-proof-v3",
+            **execution_device_policy(),
             "binding_kind": "foundation_only",
             "status": "pass",
             "target_reference_validation_status": "not_claimed",
@@ -110,6 +112,7 @@ def _synthetic_trial_and_dataset() -> tuple[TrialSpec, ReferenceDataset]:
             "proof_hash": "synthetic-proof",
         },
         binding_proof_hash="synthetic-proof",
+        **execution_device_policy(),
     )
     return trial, dataset
 

@@ -10,11 +10,14 @@ import scipy
 import torch
 
 from pol import __version__
+from pol.runtime.device import execution_device_policy
 
 
 def numerical_environment_fingerprint() -> dict[str, Any]:
     """Return backend facts that can change deterministic numerical bytes."""
     return {
+        "schema_version": "pol-numerical-environment-v2",
+        **execution_device_policy(),
         "pol_version": __version__,
         "python_version": platform.python_version(),
         "python_implementation": platform.python_implementation(),

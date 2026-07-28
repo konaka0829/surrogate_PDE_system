@@ -7,6 +7,10 @@ from typing import Any, Mapping
 
 from pol.config.models import DatasetSpec, ValidationSpec
 from pol.numerics.initial_conditions import GRF_SAMPLER_SEMANTICS
+from pol.runtime.device import (
+    execution_device_policy,
+    verify_execution_device_policy,
+)
 from pol.runtime.hashing import stable_object_hash
 
 
@@ -99,6 +103,17 @@ def _foundation_checks(
             requested=foundation,
             binding_kind=binding_kind,
         )
+    try:
+        verify_execution_device_policy(
+            certificate,
+            boundary="dataset binding validation certificate",
+        )
+        verify_execution_device_policy(
+            foundation,
+            boundary="dataset binding foundation contract",
+        )
+    except ValueError as exc:
+        raise DatasetBindingError(str(exc)) from exc
     checks: list[dict[str, Any]] = []
     samples = foundation.get("samples")
     if not isinstance(samples, Mapping):
@@ -187,6 +202,11 @@ def _foundation_checks(
             int(requested_samples.seed),
         ),
         (
+            "$.foundation_contract.samples.device",
+            samples.get("device"),
+            "cpu",
+        ),
+        (
             "$.foundation_contract.samples.preprocessing",
             samples.get("preprocessing"),
             requested_samples.preprocessing,
@@ -253,6 +273,7 @@ def _dataset_condition(
         "target": dataset_spec.target.model_dump(mode="json"),
         "dtype": validation_spec.samples.dtype,
         "domain_length": float(validation_spec.domain.length),
+        **execution_device_policy(),
     }
 
 
@@ -436,7 +457,8 @@ def _evaluate_validated_reference(
     )
     return _proof_with_hash(
         {
-            "schema_version": "pol-dataset-binding-proof-v2",
+            "schema_version": "pol-dataset-binding-proof-v3",
+            **execution_device_policy(),
             "binding_kind": binding_kind,
             "status": "pass",
             "target_reference_validation_status": "validated",
@@ -498,7 +520,8 @@ def _evaluate_foundation_only(
     reason = dataset_spec.binding.reason
     return _proof_with_hash(
         {
-            "schema_version": "pol-dataset-binding-proof-v2",
+            "schema_version": "pol-dataset-binding-proof-v3",
+            **execution_device_policy(),
             "binding_kind": binding_kind,
             "status": "pass",
             "target_reference_validation_status": "not_claimed",
@@ -540,8 +563,12 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
     proof_hash = copied.pop("proof_hash", None)
     if not isinstance(proof_hash, str) or stable_object_hash(copied) != proof_hash:
         raise ValueError("dataset binding proof hash mismatch")
-    if copied.get("schema_version") != "pol-dataset-binding-proof-v2":
+    if copied.get("schema_version") != "pol-dataset-binding-proof-v3":
         raise ValueError("unsupported dataset binding proof schema")
+    verify_execution_device_policy(
+        copied,
+        boundary="dataset binding proof",
+    )
     if copied.get("status") != "pass":
         raise ValueError("dataset binding proof is not passing")
     kind = copied.get("binding_kind")
@@ -562,6 +589,10 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
         sampler_domain_length, dataset_condition.get("domain_length")
     ):
         raise ValueError("dataset binding proof GRF sampler domain mismatch")
+    verify_execution_device_policy(
+        dataset_condition,
+        boundary="dataset binding proof condition",
+    )
     if kind == "validated_reference":
         if target_status != "validated":
             raise ValueError(
@@ -576,6 +607,8 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
         )
         expected_keys = {
             "schema_version",
+            "execution_device_policy",
+            "compute_device",
             "binding_kind",
             "status",
             "target_reference_validation_status",
@@ -610,6 +643,8 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
         required = ("foundation_contract", "foundation_checks", "dataset_condition")
         expected_keys = {
             "schema_version",
+            "execution_device_policy",
+            "compute_device",
             "binding_kind",
             "status",
             "target_reference_validation_status",
@@ -656,6 +691,10 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             dict(foundation)
         ) != copied.get("foundation_contract_hash"):
             raise ValueError("foundation-only proof foundation contract mismatch")
+        verify_execution_device_policy(
+            foundation,
+            boundary="foundation-only dataset binding proof",
+        )
         if any(
             not _canonical_equal(value, sampler_domain_length)
             for value in domain_copies

@@ -162,6 +162,25 @@ the primary independent-realization result.
 
 ## Execution and reporting
 
+- The validated first-paper workflow is CPU-only. Its public validation schema
+  accepts only `samples.device="cpu"` (the default) and rejects `"cuda"`,
+  `"auto"`, and unknown values before numerical work begins.
+- The CPU-only scope covers validation and reference convergence, master
+  initial-condition publication, dataset target batches and serialized/loaded
+  tensors, feature-state publication/load, readout fitting inputs, frozen
+  models, test evaluation, diagnostics, and completed study runs.
+- Every artifact family in that path records
+  `execution_device_policy="cpu_only"` and `compute_device="cpu"` in its
+  content-addressed provenance. A PyTorch build's `torch_cuda_version` is
+  environment metadata only and is not evidence that CUDA computation
+  occurred.
+- A non-CPU tensor reaching an official workflow boundary is a contract
+  violation and must be rejected with the boundary identified. Existing
+  publication-time `detach().cpu()` operations define serialized CPU bytes;
+  they must not conceal a non-CPU upstream solve.
+- Low-level numerical kernels may preserve an input tensor's device. That
+  algebraic generality is outside the validated artifact guarantee and does
+  not constitute end-to-end GPU support.
 - Main profiles and production-resolution studies must not be run by automated
   tests or during Codex maintenance work. Tests and maintenance validation use
   tiny or smoke profiles only.

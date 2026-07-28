@@ -415,7 +415,7 @@ def test_certificate_loader_rejects_master_sampler_domain_tamper(
         load_validation_certificate(outcome.reference.path)
 
 
-def test_certificate_loader_rejects_p0_02_certificate_revision(
+def test_certificate_loader_rejects_pre_p0_04_certificate_revision(
     tmp_path: Path,
 ) -> None:
     validation_path, _, _ = write_tiny_stack(tmp_path)
@@ -427,5 +427,5 @@ def test_certificate_loader_rejects_p0_02_certificate_revision(
     certificate["schema_version"] = "pol-validation-certificate-v2"
     write_strict_json(certificate_path, certificate)
     _refresh_artifact_record(outcome.reference.path, "certificate.json")
-    with pytest.raises(ValueError, match="P0-03 requires"):
+    with pytest.raises(ValueError, match="P0-04 requires"):
         load_validation_certificate(outcome.reference.path)

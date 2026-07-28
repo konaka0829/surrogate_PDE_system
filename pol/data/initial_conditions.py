@@ -8,6 +8,7 @@ from pol.numerics.initial_conditions import (
     GRF_SAMPLER_SEMANTICS,
     sample_gaussian_random_field_initial_conditions,
 )
+from pol.runtime.device import execution_device_policy, require_cpu_tensors
 
 
 _DTYPE_MAP = {"float32": torch.float32, "float64": torch.float64}
@@ -25,15 +26,12 @@ class InitialConditionArchive:
 
 
 def resolve_device(name: str) -> torch.device:
-    if name == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA requested but unavailable")
-        return torch.device("cuda")
-    if name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if name == "cpu":
         return torch.device("cpu")
-    raise ValueError(f"unsupported device: {name}")
+    raise ValueError(
+        "official scientific workflows are CPU-only; device must be 'cpu'; "
+        f"got {name!r}"
+    )
 
 
 def torch_dtype(name: str) -> torch.dtype:
@@ -70,7 +68,7 @@ def generate_grf_archive(
         device=resolved_device,
         dtype=resolved_dtype,
     )
-    return InitialConditionArchive(
+    archive = InitialConditionArchive(
         sample_ids=torch.arange(total_samples, dtype=torch.long, device=resolved_device),
         values=values,
         fourier=torch.fft.rfft(values, dim=-1, norm="forward"),
@@ -87,5 +85,12 @@ def generate_grf_archive(
             "sampler_semantics": GRF_SAMPLER_SEMANTICS,
             "dtype": dtype,
             "device": str(resolved_device),
+            **execution_device_policy(),
         },
     )
+    require_cpu_tensors(
+        archive.__dict__,
+        boundary="master initial-condition generation",
+        name="archive",
+    )
+    return archive

@@ -34,6 +34,10 @@ trial and study execution path.
   back before the first test state solve or test metric.
 - Validation products, datasets, feature states, and completed studies are
   content addressed and verified by exact byte manifests.
+- The validated artifact, dataset, feature-state, and study workflow is
+  CPU-only. Public validation configuration accepts only `device="cpu"` and
+  records that policy independently of whether the installed PyTorch build
+  contains CUDA libraries.
 - Content-addressed provenance is distinct from target-reference convergence.
   Every dataset declares either a `validated_reference` binding to an exact
   validated candidate suffix or a reason-bearing `foundation_only` binding
@@ -101,6 +105,27 @@ For an execution-only installation:
 python -m pip install -e .
 ```
 
+## Execution device policy
+
+The first-paper scientific workflow is formally CPU-only. This scope includes
+validation checks and reference convergence, master initial-condition
+publication, dataset target generation and loading, feature-state caching,
+readout fitting and freezing, test evaluation, diagnostics, and study
+publication/verification.
+
+`samples.device` defaults to `"cpu"` and is the only accepted value in the
+`pol-validation-v3` schema. `"cuda"`, `"auto"`, and unknown values fail during
+configuration loading; they are never silently converted to CPU. A
+CUDA-enabled PyTorch wheel may still report a non-null `torch_cuda_version` in
+the numerical environment fingerprint. That field describes the installed
+build, while `execution_device_policy="cpu_only"` and
+`compute_device="cpu"` describe this workflow's execution contract.
+
+Low-level tensor algebra may continue to preserve the device of tensors passed
+directly to it. That generality is not public end-to-end GPU support. CUDA
+dataset generation, solver/cache/readout execution, serialization, diagnostics,
+and cross-device reproducibility remain unimplemented.
+
 ## Command-line interface
 
 There are four commands.
@@ -135,7 +160,10 @@ target-reference contracts, selected candidate indices, complete ordered
 candidate lists, exact allowed suffixes, and master-archive tensor hashes.
 The P0-03 foundation contract additionally binds the actual GRF sampler
 semantics and sampler `domain_length` to the resolved domain, serialized
-master archive, and downstream dataset proof.
+master archive, and downstream dataset proof. P0-04 adds a hashed CPU-only
+execution policy to the numerical environment, validation identity,
+certificate, foundation contract, and master archive. Publication and loading
+verify that all master tensors are on CPU.
 
 ### 2. Build or reuse a target dataset
 
@@ -318,15 +346,17 @@ ensemble row counts. `dataset_reference.json` stores the full dataset binding
 proof, while both it and `run_summary.json` expose the binding kind, binding
 status, target-reference validation status, and proof hash.
 
-The study-run identity, manifest, summary, frozen model archive, selection
-record, and frozen evaluation plan use the P0-02 `v3` contract. Earlier `v1`
-and `v2` study runs are rejected rather than interpreted with the new binding
-semantics. P0-03 uses validation identity/certificate `v3`, initial-condition
-archive and dataset artifact `v3`, foundation/master binding `v2`, and dataset
-binding proof `v2`. P0-02 artifacts are rejected rather than interpreted with
-the physical-domain GRF semantics. The package version and numerical
-environment fingerprint also separate new runs from earlier cached
-identities.
+P0-04 uses study-run identity, manifest, summary, selection, frozen plan, and
+frozen-model archive `v4`, plus study dataset-reference `v3`. Validation
+identity/certificate and initial-condition/dataset artifact families use `v4`;
+foundation/master binding and dataset binding proof use `v3`; feature-state
+identity/archive/metadata use `v2`. Earlier artifacts and study runs are
+rejected rather than treated as carrying the CPU-only guarantee. Package
+version `0.2.4` and numerical-environment schema
+`pol-numerical-environment-v2` also separate new identities from older cached
+results. The earlier P0-02/P0-03 proof semantics remain intact; the execution
+policy is included in their content hashes rather than inferred from storage
+location or CUDA library metadata.
 
 ## Included profiles
 
@@ -357,12 +387,14 @@ pytest -q
 ```
 
 The suite covers Fourier and Nyquist behavior, GRF physical-domain covariance
-scaling on odd and even grids, the unit-domain deterministic regression,
-finite-input information isolation, strict configuration, dimension
-independence, fixed and learned readouts, artifact tamper detection, foundation
-validation, dataset splitting, unified scalar/sweep planning, selection
-freezing, test-order enforcement, plot regeneration, CLI behavior, and the
-absence of publication-number namespaces from the core package.
+scaling on odd and even grids, unit-domain and P0-04 CPU deterministic
+regressions, finite-input information isolation, strict CPU-only configuration,
+CPU tensor invariants at artifact boundaries, execution-policy tamper
+detection, dimension independence, fixed and learned readouts, artifact tamper
+detection, foundation validation, dataset splitting, unified scalar/sweep
+planning, selection freezing, test-order enforcement, plot regeneration, CLI
+behavior, and the absence of publication-number namespaces from the core
+package.
 
 For a complete local smoke sequence:
 

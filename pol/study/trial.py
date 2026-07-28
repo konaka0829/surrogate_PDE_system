@@ -26,6 +26,11 @@ from pol.learning.metrics import (
 from pol.learning.observations import observe_equispaced_periodic
 from pol.learning.random_features import RandomFeatureMap
 from pol.learning.ridge import fit_centered_affine_ridge
+from pol.runtime.device import (
+    require_cpu_tensor,
+    require_cpu_tensors,
+    verify_execution_device_policy,
+)
 from pol.runtime.hashing import stable_object_hash
 from .cache import FeatureStateCache
 
@@ -180,6 +185,11 @@ def _representation_floor(
 
 
 def _serialize_affine(readout, *, zeta: float) -> dict[str, Any]:
+    require_cpu_tensors(
+        {"W": readout.W, "b": readout.b},
+        boundary="frozen affine readout publication",
+        name="readout",
+    )
     return {
         "kind": "affine_ridge",
         "zeta": float(zeta),
@@ -205,14 +215,34 @@ def predict_frozen(
     q: int,
     domain_length: float,
 ) -> FrozenPredictions:
+    require_cpu_tensor(
+        features,
+        boundary="frozen model prediction input",
+        name="features",
+    )
+    require_cpu_tensors(
+        model,
+        boundary="frozen model prediction archive",
+        name="model",
+    )
     kind = model["kind"]
     if kind == "direct_fourier_decoder":
         prediction = decode_point_observation_to_real_fourier(
             features, q, domain_length=domain_length
         )
+        require_cpu_tensor(
+            prediction,
+            boundary="frozen direct-model prediction",
+            name="prediction",
+        )
         return FrozenPredictions(prediction, ())
     if kind == "affine_ridge":
         prediction = _predict_affine(model, features)
+        require_cpu_tensor(
+            prediction,
+            boundary="frozen affine-model prediction",
+            name="prediction",
+        )
         return FrozenPredictions(prediction, ())
     if kind == "random_feature_ridge":
         predictions: list[tuple[int, torch.Tensor]] = []
@@ -227,6 +257,11 @@ def predict_frozen(
             )
             lifted = random_map(features.to(member["A"].device, member["A"].dtype))
             prediction = _predict_affine(member, lifted)
+            require_cpu_tensor(
+                prediction,
+                boundary="frozen random-feature-model prediction",
+                name=f"prediction_seed_{member['seed']}",
+            )
             predictions.append((int(member["seed"]), prediction))
         return FrozenPredictions(None, tuple(predictions))
     raise ValueError(f"unknown frozen model kind: {kind}")
@@ -255,6 +290,22 @@ class TrialEngine:
         self.n_train = int(dataset.train_ids.numel())
         self._finite_cache: dict[tuple[str, int, int], FiniteDataView] = {}
         self._candidate_cache: dict[str, CandidateEvaluation] = {}
+        verify_execution_device_policy(
+            dataset.__dict__,
+            boundary="trial-engine dataset",
+        )
+        require_cpu_tensors(
+            {
+                "sample_ids": dataset.sample_ids,
+                "inputs_reference": dataset.inputs_reference,
+                "targets_reference": dataset.targets_reference,
+                "train_ids": dataset.train_ids,
+                "validation_ids": dataset.validation_ids,
+                "test_ids": dataset.test_ids,
+            },
+            boundary="trial-engine dataset",
+            name="dataset",
+        )
 
     def _finite(self, ids: torch.Tensor, trial: TrialSpec) -> FiniteDataView:
         key = (
@@ -272,6 +323,11 @@ class TrialEngine:
                 q=int(trial.output.q),
                 domain_length=self.dataset.domain_length,
             )
+            require_cpu_tensors(
+                self._finite_cache[key].__dict__,
+                boundary="finite data view",
+                name="finite",
+            )
         return self._finite_cache[key]
 
     def evaluate_selection(self, trial: TrialSpec) -> CandidateEvaluation:
@@ -285,6 +341,17 @@ class TrialEngine:
             int(trial.feature.observation.J),
             domain_length=self.dataset.domain_length,
             l2_scale=trial.feature.observation.l2_scale,
+        )
+        require_cpu_tensors(
+            {
+                "state": state.values,
+                "features": features,
+                "target_coefficients": finite.target_coefficients,
+                "targets": finite.targets,
+                "targets_reference": finite.targets_reference,
+            },
+            boundary="readout selection inputs",
+            name="selection",
         )
         x_train = features[: self.n_train]
         x_validation = features[self.n_train :]
@@ -347,6 +414,18 @@ class TrialEngine:
         target_reference_validation: torch.Tensor,
         trial: TrialSpec,
     ) -> tuple[dict[str, float], dict[str, Any], dict[str, Any]]:
+        require_cpu_tensors(
+            {
+                "x_train": x_train,
+                "y_train": y_train,
+                "x_validation": x_validation,
+                "y_validation": y_validation,
+                "target_validation": target_validation,
+                "target_reference_validation": target_reference_validation,
+            },
+            boundary="readout fitting inputs",
+            name="fit",
+        )
         q = int(trial.output.q)
         n_tar = int(trial.input.n_tar)
         L = self.dataset.domain_length
@@ -509,6 +588,11 @@ class TrialEngine:
                 "zeta": chosen["zeta"],
                 "members": members,
             }
+            require_cpu_tensors(
+                model,
+                boundary="frozen random-feature readout publication",
+                name="model",
+            )
             return (
                 chosen["metrics"],
                 model,
@@ -538,6 +622,18 @@ class TrialEngine:
             int(trial.feature.observation.J),
             domain_length=self.dataset.domain_length,
             l2_scale=trial.feature.observation.l2_scale,
+        )
+        require_cpu_tensors(
+            {
+                "state": state.values,
+                "features": features,
+                "target_coefficients": finite.target_coefficients,
+                "targets": finite.targets,
+                "targets_reference": finite.targets_reference,
+                "model": model,
+            },
+            boundary="test evaluation inputs",
+            name="test",
         )
         predictions = predict_frozen(
             model,

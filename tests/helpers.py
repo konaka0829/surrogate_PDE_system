@@ -23,7 +23,7 @@ def write_tiny_stack(
     validation_path = write_json(
         root / "validation.json",
         {
-            "schema_version": "pol-validation-v2",
+            "schema_version": "pol-validation-v3",
             "name": "tiny_foundation",
             "artifact_root": str(artifact_root),
             "profile": "test",
