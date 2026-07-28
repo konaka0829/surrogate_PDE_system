@@ -1,4 +1,4 @@
-# Known scientific risks at Phase P0-01
+# Known scientific risks at Phase P0-02
 
 Status terms in this document have strict meanings:
 
@@ -66,33 +66,46 @@ is affected by this specific discrepancy.
 
 ## R3. Validation and dataset solver/reference binding is scientifically weak
 
-**Status: confirmed as an allowed configuration; the numerical impact of any
-particular main artifact is not yet verified.**
+**Status: resolved for explicit target-reference claims in P0-02; heat remains
+intentionally foundation-only.**
 
-Relevant code:
+Earlier behavior:
+
+The P0-01 dataset identity was strongly bound to a validation artifact ID, but
+the builder only checked that `reference_nx` did not exceed the master archive
+resolution. It did not require the target solver/time/PDE condition to match
+the Burgers convergence certificate. The checked-in heat dataset reused that
+artifact, and smoke used dataset `reference_nx=64` after certificate selection
+at 32 without recording why that refinement was allowed. Content provenance
+was exact while the target-validation claim was under-specified.
+
+P0-02 resolution:
 
 - `pol/data/dataset.py::ensure_dataset`
-- `pol/data/dataset.py::_build_dataset`
-- `pol/validation/runner.py::run_validation`
+- `pol/validation/binding.py::evaluate_dataset_binding`
+- `pol/validation/runner.py::load_validation_certificate`
 - `pol/config/models.py::DatasetSpec`
 
-The dataset identity is strongly bound to the validation artifact ID, and the
-dataset builder checks that `reference_nx` does not exceed the master archive
-resolution. It does not require `DatasetSpec.reference_nx` to equal the
-certificate's `selected_reference_nx`, and it does not require the dataset
-target solver/time configuration to match the validated reference evolution
-or selected time candidate. The checked-in heat dataset intentionally reuses a
-Burgers foundation-validation archive, illustrating that the certificate
-currently acts partly as an initial-condition/numerical-foundation certificate
-rather than a target-specific solver certificate. The P0-00 smoke run also
-confirmed a certificate-selected reference resolution of 32 while the
-checked-in smoke datasets were built at `reference_nx=64`; this is permitted by
-the present maximum-master-resolution check.
+Certificates now have separate foundation and Burgers target-reference
+contracts. Dataset schema `pol-dataset-v2` requires either
+`validated_reference` or a reason-bearing `foundation_only` binding. The
+former checks exact system kind, invariant parameters, evolution time, dtype,
+and domain, and accepts only exact members of the recorded spatial and
+time-candidate suffixes. It does not infer safety from larger resolution or
+smaller time step. The latter fixes target-reference status to `not_claimed`
+and binds only the general foundation and master archive.
 
-**Potential impact:** artifact provenance can be exact while the scientific
-claim “this target field uses the convergence-validated reference conditions”
-is under-specified. A dataset may use a resolution or target evolution whose
-convergence was not established by the bound certificate.
+Binding is evaluated before target evolution. The canonical proof/hash/status
+are part of dataset identity and are cross-checked across dataset and study
+payloads. Burgers smoke's 32-to-64 use is now accepted specifically because 64
+is the next recorded candidate; an unlisted 48 is rejected.
+
+**Residual caveat:** checked-in heat smoke and main profiles are
+`foundation_only`. Their initial conditions, domain, dtype, splits, and master
+archive are provenance-bound to a passing foundation, but heat
+target-reference convergence has not been established and is never claimed.
+P0-02 does not add an analytic or numerical heat convergence test. Existing
+main artifacts were not executed or retrospectively certified in this phase.
 
 ## R4. Device configuration is not end-to-end
 

@@ -1,5 +1,5 @@
 {
-  "schema_version": "pol-validation-v1",
+  "schema_version": "pol-validation-v2",
   "name": "periodic_burgers_foundation_smoke",
   "artifact_root": "artifacts",
   "profile": "smoke",

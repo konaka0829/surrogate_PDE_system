@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
@@ -173,7 +174,7 @@ class ReducedObservationSpec(StrictModel):
 
 
 class ValidationSpec(StrictModel):
-    schema_version: Literal["pol-validation-v1"] = "pol-validation-v1"
+    schema_version: Literal["pol-validation-v2"] = "pol-validation-v2"
     name: str
     artifact_root: Path = Path("artifacts")
     profile: str = "smoke"
@@ -210,6 +211,25 @@ class ValidationSpec(StrictModel):
             )
         if len(self.time_candidates) < 2:
             raise ValueError("at least two time_candidates are required")
+        serialized_time_candidates = tuple(
+            json.dumps(candidate.model_dump(mode="json"), sort_keys=True)
+            for candidate in self.time_candidates
+        )
+        if len(set(serialized_time_candidates)) != len(serialized_time_candidates):
+            raise ValueError("time_candidates must be unique")
+        reference_time_candidate = {
+            "dt": self.reference_evolution.system.dt,
+            "fine_dt": self.reference_evolution.system.fine_dt,
+            "solver": self.reference_evolution.system.solver,
+            "dealias": self.reference_evolution.system.dealias,
+        }
+        if reference_time_candidate != self.time_candidates[-1].model_dump(
+            mode="json"
+        ):
+            raise ValueError(
+                "reference_evolution time discretization must equal the finest "
+                "time_candidates entry"
+            )
         if not self.calibration_sample_ids:
             raise ValueError("calibration_sample_ids must not be empty")
         if len(set(self.calibration_sample_ids)) != len(self.calibration_sample_ids):
@@ -232,11 +252,34 @@ class ValidationSpec(StrictModel):
         return self
 
 
+class ValidatedReferenceBindingSpec(StrictModel):
+    kind: Literal["validated_reference"] = "validated_reference"
+
+
+class FoundationOnlyBindingSpec(StrictModel):
+    kind: Literal["foundation_only"] = "foundation_only"
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason")
+    @classmethod
+    def _nonempty_reason(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("foundation_only reason must not be blank")
+        return value
+
+
+DatasetBindingSpec = Annotated[
+    Union[ValidatedReferenceBindingSpec, FoundationOnlyBindingSpec],
+    Field(discriminator="kind"),
+]
+
+
 class DatasetSpec(StrictModel):
-    schema_version: Literal["pol-dataset-v1"] = "pol-dataset-v1"
+    schema_version: Literal["pol-dataset-v2"] = "pol-dataset-v2"
     name: str
     artifact_root: Path = Path("artifacts")
     validation_spec: Path
+    binding: DatasetBindingSpec
     reference_nx: PositiveInt
     target: EvolutionSpec
     batch_size: PositiveInt = 20

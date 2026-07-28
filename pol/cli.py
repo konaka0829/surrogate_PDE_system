@@ -27,15 +27,20 @@ def _parser() -> argparse.ArgumentParser:
     validate = commands.add_parser(
         "validate", help="validate numerical foundations and publish a certificate"
     )
-    validate.add_argument("spec", help="path to a pol-validation-v1 JSON spec")
+    validate.add_argument("spec", help="path to a pol-validation-v2 JSON spec")
     validate.add_argument("--force", action="store_true")
 
     data = commands.add_parser("data", help="reference-dataset operations")
     data_commands = data.add_subparsers(dest="data_command", required=True)
     build = data_commands.add_parser(
-        "build", help="build or reuse a validated reference dataset"
+        "build", help="build or reuse an explicitly validation-bound reference dataset"
     )
-    build.add_argument("spec", help="path to a pol-dataset-v1 JSON spec")
+    build.add_argument(
+        "spec",
+        help=(
+            "path to a pol-dataset-v2 JSON spec with an explicit validation binding"
+        ),
+    )
     build.add_argument("--force", action="store_true")
 
     run = commands.add_parser(
@@ -94,6 +99,12 @@ def main(argv: list[str] | None = None) -> int:
                     "reference_nx": dataset.reference_nx,
                     "total_samples": dataset.total_samples,
                     "split_hash": dataset.split_hash,
+                    "binding_kind": dataset.binding_kind,
+                    "binding_status": dataset.binding_status,
+                    "target_reference_validation_status": (
+                        dataset.target_reference_validation_status
+                    ),
+                    "binding_proof_hash": dataset.binding_proof_hash,
                 }
             )
             return 0
@@ -133,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
             if schema == "pol-artifact-manifest-v1":
                 manifest = verify_artifact(path)
                 kind = "artifact"
-            elif schema == "pol-study-run-manifest-v2":
+            elif schema == "pol-study-run-manifest-v3":
                 manifest = verify_study_run(path)
                 kind = "study_run"
             else:

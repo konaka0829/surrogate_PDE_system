@@ -24,6 +24,7 @@ from pol.runtime.artifacts import RunTransaction, manifest_records
 from pol.runtime.environment import numerical_environment_fingerprint
 from pol.runtime.hashing import stable_object_hash, tensor_sha256
 from pol.runtime.io import atomic_torch_save, file_sha256, write_csv, write_strict_json
+from pol.validation.binding import verify_binding_proof
 from .cache import FeatureStateCache
 from .convergence import check_convergence
 from .diagnostics import heat_multiplier_rows, noise_robustness_rows
@@ -219,7 +220,7 @@ def _run_manifest(root: Path, *, identity: Mapping[str, Any]) -> None:
     write_strict_json(
         root / "manifest.json",
         {
-            "schema_version": "pol-study-run-manifest-v2",
+            "schema_version": "pol-study-run-manifest-v3",
             "identity": dict(identity),
             "files": manifest_records(root, names),
         },
@@ -263,6 +264,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     identity = manifest.get("identity")
     if not isinstance(identity, Mapping):
         raise ValueError("study-run identity must be an object")
+    if identity.get("schema_version") != "pol-study-run-identity-v3":
+        raise ValueError("unsupported legacy study-run identity")
     run_hash = stable_object_hash(dict(identity))
     resolved_study = json.loads(
         (root / "resolved_study.json").read_text(encoding="utf-8")
@@ -271,7 +274,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError("resolved study does not match manifest identity")
 
     summary = json.loads((root / "run_summary.json").read_text(encoding="utf-8"))
-    if summary.get("schema_version") != "pol-study-run-summary-v2":
+    if summary.get("schema_version") != "pol-study-run-summary-v3":
         raise ValueError("unsupported study-run summary schema")
     if summary.get("run_hash") != run_hash:
         raise ValueError("study-run summary hash does not match manifest identity")
@@ -283,7 +286,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     selection = json.loads(
         (root / "selection_record.json").read_text(encoding="utf-8")
     )
-    if selection.get("schema_version") != "pol-selection-record-v2":
+    if selection.get("schema_version") != "pol-selection-record-v3":
         raise ValueError("unsupported selection-record schema")
     _assert_selection_record_safe(selection)
     if selection.get("test_data_used") is not False:
@@ -295,7 +298,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     plan = json.loads(
         (root / "frozen_evaluation_plan.json").read_text(encoding="utf-8")
     )
-    if plan.get("schema_version") != "pol-frozen-evaluation-plan-v2":
+    if plan.get("schema_version") != "pol-frozen-evaluation-plan-v3":
         raise ValueError("unsupported frozen evaluation plan schema")
     stored_plan_hash = plan.pop("plan_content_hash", None)
     computed_plan_hash = stable_object_hash(plan)
@@ -314,6 +317,34 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     dataset_reference = json.loads(
         (root / "dataset_reference.json").read_text(encoding="utf-8")
     )
+    if not isinstance(dataset_reference, Mapping):
+        raise ValueError("study dataset reference must be an object")
+    if dataset_reference.get("schema_version") != "pol-study-dataset-reference-v2":
+        raise ValueError("unsupported study dataset-reference schema")
+    dataset_binding_proof = dataset_reference.get("binding_proof")
+    if not isinstance(dataset_binding_proof, Mapping):
+        raise ValueError("study dataset reference has no binding proof")
+    verify_binding_proof(dataset_binding_proof)
+    expected_dataset_binding = {
+        "dataset_binding_kind": dataset_binding_proof["binding_kind"],
+        "dataset_binding_status": dataset_binding_proof["status"],
+        "dataset_target_reference_validation_status": dataset_binding_proof[
+            "target_reference_validation_status"
+        ],
+        "dataset_binding_proof_hash": dataset_binding_proof["proof_hash"],
+    }
+    for source_name, source in (
+        ("identity", identity),
+        ("selection record", selection),
+        ("frozen plan", plan),
+        ("run summary", summary),
+        ("dataset reference", dataset_reference),
+    ):
+        for field, expected_value in expected_dataset_binding.items():
+            if source.get(field) != expected_value:
+                raise ValueError(
+                    f"{source_name} dataset validation binding mismatch: {field}"
+                )
     if identity.get("dataset_artifact_id") != dataset_reference.get("artifact_id"):
         raise ValueError("manifest dataset binding mismatch")
     if identity.get("dataset_split_hash") != dataset_reference.get("split_hash"):
@@ -324,6 +355,10 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError("frozen plan split binding mismatch")
     if summary.get("dataset_artifact_id") != dataset_reference.get("artifact_id"):
         raise ValueError("run summary dataset binding mismatch")
+    if dataset_reference.get("validation_artifact_id") != (
+        dataset_binding_proof.get("certificate_artifact_id")
+    ):
+        raise ValueError("study dataset-reference certificate binding mismatch")
 
     model_name = plan.get("frozen_models_file")
     if not isinstance(model_name, str) or Path(model_name).name != model_name:
@@ -332,7 +367,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     if file_sha256(model_path) != plan.get("frozen_models_sha256"):
         raise ValueError("frozen model archive hash mismatch")
     archive = torch.load(model_path, map_location="cpu", weights_only=True)
-    if archive.get("schema_version") != "pol-frozen-model-archive-v2":
+    if archive.get("schema_version") != "pol-frozen-model-archive-v3":
         raise ValueError("unsupported frozen model archive schema")
     if archive.get("selection_record_hash") != selection_hash:
         raise ValueError("frozen model archive selection binding mismatch")
@@ -595,7 +630,7 @@ def verify_study_run(path: Path | str) -> dict[str, Any]:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise ValueError("study run has no manifest")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "pol-study-run-manifest-v2":
+    if manifest.get("schema_version") != "pol-study-run-manifest-v3":
         raise ValueError("unsupported study-run manifest")
     expected_records = manifest.get("files")
     if not isinstance(expected_records, list):
@@ -716,11 +751,17 @@ def run_study(
             "operator-learning studies require nonempty validation and test splits"
         )
     identity = {
-        "schema_version": "pol-study-run-identity-v2",
+        "schema_version": "pol-study-run-identity-v3",
         "environment": numerical_environment_fingerprint(),
         "study": _scientific_spec(spec),
         "dataset_artifact_id": dataset.artifact_id,
         "dataset_split_hash": dataset.split_hash,
+        "dataset_binding_kind": dataset.binding_kind,
+        "dataset_binding_status": dataset.binding_status,
+        "dataset_target_reference_validation_status": (
+            dataset.target_reference_validation_status
+        ),
+        "dataset_binding_proof_hash": dataset.binding_proof_hash,
     }
     run_hash = stable_object_hash(identity)
     final_dir = spec.output_root / spec.name / f"{spec.profile}-{run_hash[:12]}"
@@ -753,7 +794,7 @@ def run_study(
             f"{case_id}: n_tar={n_tar}" for case_id, n_tar in oversized
         )
         raise ValueError(
-            "study finite-data resolution exceeds the validated target "
+            "study finite-data resolution exceeds the dataset target "
             f"reference_nx={dataset.reference_nx}: {details}"
         )
     cache = FeatureStateCache(
@@ -847,10 +888,16 @@ def run_study(
         )
 
     selection_record = {
-        "schema_version": "pol-selection-record-v2",
+        "schema_version": "pol-selection-record-v3",
         "study": spec.name,
         "profile": spec.profile,
         "dataset_artifact_id": dataset.artifact_id,
+        "dataset_binding_kind": dataset.binding_kind,
+        "dataset_binding_status": dataset.binding_status,
+        "dataset_target_reference_validation_status": (
+            dataset.target_reference_validation_status
+        ),
+        "dataset_binding_proof_hash": dataset.binding_proof_hash,
         "split_binding": {
             "split_hash": dataset.split_hash,
             "train_ids_hash": tensor_sha256(dataset.train_ids),
@@ -882,7 +929,7 @@ def run_study(
                 "model": evaluation.frozen_models[readout_id],
             }
     frozen_archive = {
-        "schema_version": "pol-frozen-model-archive-v2",
+        "schema_version": "pol-frozen-model-archive-v3",
         "selection_record_hash": selection_hash,
         "models": frozen_models,
     }
@@ -895,9 +942,17 @@ def run_study(
         write_strict_json(
             staging / "dataset_reference.json",
             {
+                "schema_version": "pol-study-dataset-reference-v2",
                 "artifact_id": dataset.artifact_id,
                 "split_hash": dataset.split_hash,
                 "validation_artifact_id": dataset.validation_artifact_id,
+                "dataset_binding_kind": dataset.binding_kind,
+                "dataset_binding_status": dataset.binding_status,
+                "dataset_target_reference_validation_status": (
+                    dataset.target_reference_validation_status
+                ),
+                "dataset_binding_proof_hash": dataset.binding_proof_hash,
+                "binding_proof": dataset.binding_proof,
             },
         )
         write_csv(
@@ -917,10 +972,16 @@ def run_study(
         atomic_torch_save(staging / "frozen_models.pt", frozen_archive)
         model_file_hash = file_sha256(staging / "frozen_models.pt")
         frozen_plan = {
-            "schema_version": "pol-frozen-evaluation-plan-v2",
+            "schema_version": "pol-frozen-evaluation-plan-v3",
             "study": spec.name,
             "dataset_artifact_id": dataset.artifact_id,
             "dataset_split_hash": dataset.split_hash,
+            "dataset_binding_kind": dataset.binding_kind,
+            "dataset_binding_status": dataset.binding_status,
+            "dataset_target_reference_validation_status": (
+                dataset.target_reference_validation_status
+            ),
+            "dataset_binding_proof_hash": dataset.binding_proof_hash,
             "selection_record_hash": selection_hash,
             "frozen_models_file": "frozen_models.pt",
             "frozen_models_sha256": model_file_hash,
@@ -955,6 +1016,18 @@ def run_study(
             raise ValueError("frozen plan dataset binding mismatch")
         if loaded_plan.get("dataset_split_hash") != dataset.split_hash:
             raise ValueError("frozen plan split binding mismatch")
+        if loaded_plan.get("dataset_binding_kind") != dataset.binding_kind:
+            raise ValueError("frozen plan dataset binding-kind mismatch")
+        if loaded_plan.get("dataset_binding_status") != dataset.binding_status:
+            raise ValueError("frozen plan dataset binding-status mismatch")
+        if loaded_plan.get(
+            "dataset_target_reference_validation_status"
+        ) != dataset.target_reference_validation_status:
+            raise ValueError("frozen plan dataset target-validation status mismatch")
+        if loaded_plan.get(
+            "dataset_binding_proof_hash"
+        ) != dataset.binding_proof_hash:
+            raise ValueError("frozen plan dataset binding-proof hash mismatch")
         if loaded_plan.get("selection_record_hash") != selection_hash:
             raise ValueError("frozen plan selection binding mismatch")
         if loaded_plan.get("test_evaluation_contract") != _test_evaluation_contract():
@@ -968,7 +1041,7 @@ def run_study(
             map_location="cpu",
             weights_only=True,
         )
-        if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v2":
+        if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v3":
             raise ValueError("unsupported frozen model archive schema")
         if loaded_archive.get("selection_record_hash") != selection_hash:
             raise ValueError("frozen model archive selection binding mismatch")
@@ -1098,12 +1171,18 @@ def run_study(
                 output_dir=staging / "figures",
             )
         summary = {
-            "schema_version": "pol-study-run-summary-v2",
+            "schema_version": "pol-study-run-summary-v3",
             "status": "pass",
             "study": spec.name,
             "profile": spec.profile,
             "run_hash": run_hash,
             "dataset_artifact_id": dataset.artifact_id,
+            "dataset_binding_kind": dataset.binding_kind,
+            "dataset_binding_status": dataset.binding_status,
+            "dataset_target_reference_validation_status": (
+                dataset.target_reference_validation_status
+            ),
+            "dataset_binding_proof_hash": dataset.binding_proof_hash,
             "case_count": len(cases),
             "validation_row_count": len(validation_rows),
             "primary_test_row_count": len(test_rows),

@@ -1,8 +1,11 @@
 {
-  "schema_version": "pol-dataset-v1",
+  "schema_version": "pol-dataset-v2",
   "name": "burgers_reference_smoke",
   "artifact_root": "artifacts",
   "validation_spec": "configs/validation/foundation_smoke.json",
+  "binding": {
+    "kind": "validated_reference"
+  },
   "reference_nx": 64,
   "target": {
     "system": {

@@ -1,6 +1,6 @@
 # Current implementation inventory
 
-This inventory describes the code present at Phase P0-01. It is a
+This inventory describes the code present at Phase P0-02. It is a
 characterization of the current implementation, not a claim that every
 implemented behavior is scientifically final.
 
@@ -24,7 +24,19 @@ flow. A passing certificate currently covers:
 The validation artifact contains the resolved specification, detailed checks,
 a passing certificate, convergence rows, and a master initial-condition
 archive. Exact-byte manifests and transactional publication are implemented by
-the artifact layer.
+the artifact layer. The certificate now separates:
+
+- a foundation contract containing domain, dtype, sample/split counts, seed,
+  the complete initial-condition specification, all general-check statuses,
+  and the master archive's tensor hashes and identity hash;
+- a Burgers target-reference contract containing invariant PDE parameters,
+  evolution time, ordered spatial and time candidate lists, selected values
+  and indices, selection policy, and machine-readable exact validated suffixes.
+
+Certificate loading reconstructs these contracts from the content-addressed
+resolved specification, checks, and master archive. Missing or contradictory
+fields, inconsistent selected indices, altered allowed suffixes, and legacy
+certificate/archive revisions are rejected.
 
 ## Data
 
@@ -39,6 +51,19 @@ The implemented data path includes:
 - separate finite targets and `n_ref` reference targets;
 - construction of the `n_sur` feature input only from the finite `n_tar`
   tensor.
+
+Every dataset has an explicit validation binding. `validated_reference`
+requires exact target-system/PDE/time/domain/dtype equality and exact
+membership of `reference_nx` and the solver/time dictionary in the certificate
+suffixes. `foundation_only` reuses only the initial-condition foundation,
+requires a reason, and reports target-reference status `not_claimed`. A pure
+binding evaluator constructs a canonical proof before target evolution.
+
+The proof and proof hash participate in dataset identity and are stored in
+`resolved_spec.json`, `metadata.json`, `dataset.pt`, and `ReferenceDataset`.
+Dataset loading cross-checks all copies. Burgers smoke explicitly proves the
+selected-32 to candidate-64 relation. Heat smoke and main remain buildable as
+foundation-only datasets and make no heat convergence claim.
 
 Checked-in dataset profiles currently provide heat and viscous Burgers targets,
 each in smoke and main sizes. The generic system schema can also describe a
@@ -129,6 +154,8 @@ results and do not receive placeholder seed uncertainty.
 - Strict Pydantic models reject unknown scientific configuration keys.
 - Scientific identities exclude storage roots and include environment and
   upstream artifact identities.
+- Dataset identities include the complete validation binding proof and hash;
+  changing a proof changes the artifact ID.
 - Validation products, datasets, feature states, and study runs are
   content-addressed and exact-byte verified.
 - Publication is transactional.
@@ -140,13 +167,14 @@ results and do not receive placeholder seed uncertainty.
 - Completed-run verification checks frozen random-feature seed membership,
   recomputes primary mean/standard-deviation/confidence-interval fields from
   per-seed rows, and checks the separate ensemble row and member count.
-- P0-01 study-run identity, manifest, summary, selection, frozen-plan, and
-  frozen-model schemas are versioned separately from P0-00 outputs; legacy
-  run manifests are rejected explicitly.
+- P0-02 study-run identity, manifest, summary, selection, frozen-plan, and
+  frozen-model schemas use `v3`. `dataset_reference.json` stores the full proof
+  and downstream summaries carry its kind/status/target status/hash. P0-01
+  `v2` and older run manifests are rejected explicitly.
 - Plot-only regeneration requires an existing verified run and is
   transactional.
 
-## P0-00 characterization baseline and P0-01 extension
+## P0-00 characterization baseline and P0-01/P0-02 extensions
 
 The following small deterministic tests fix the behaviors requested for this
 phase. No solver or metric implementation was changed to establish them.
@@ -160,15 +188,16 @@ phase. No solver or metric implementation was changed to establish them.
 | split ID separation and full coverage | `tests/test_validation_data.py::test_reference_dataset_reuses_validation_and_has_disjoint_splits` and dataset load-time validation |
 | no test access before persisted freeze-plan read-back | `tests/test_study.py::test_study_freezes_selection_before_any_test_evaluation`, completed-run semantic verification, and event-order checks |
 | independent-seed primary statistics and separate prediction ensemble | `tests/test_random_feature_evaluation.py` and the random-feature artifact/verification tests in `tests/test_study.py` |
+| certificate/dataset target-reference binding | `tests/test_dataset_binding.py`, including exact candidate suffix membership, all target-condition mismatch classes, pre-evolution rejection, heat foundation-only status, and dataset/study tamper checks |
 
-## Missing or incomplete after P0-01
+## Missing or incomplete after P0-02
 
 The following are not implemented or are incomplete; they are not repaired in
 this phase:
 
 - GRF spatial frequencies are not parameterized by `domain_length`;
-- the validation certificate's selected solver/reference conditions are not
-  strongly checked against each dataset's target solver and `reference_nx`;
+- heat profiles have no target-specific convergence certificate and therefore
+  remain explicitly `foundation_only`;
 - device selection is not propagated as an end-to-end dataset/study execution
   policy;
 - the fixed decoder silently zero-pads requested coefficients outside the

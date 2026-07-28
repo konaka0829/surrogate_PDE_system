@@ -76,6 +76,20 @@ def test_study_freezes_selection_before_any_test_evaluation(tmp_path: Path) -> N
     assert len(validation_rows) == 3
     assert len(test_rows) == 3
     assert sum(row["selected"] == "True" for row in validation_rows) == 3
+    dataset_reference = json.loads(
+        (result.path / "dataset_reference.json").read_text(encoding="utf-8")
+    )
+    assert dataset_reference["dataset_binding_kind"] == "foundation_only"
+    assert dataset_reference["dataset_binding_status"] == "pass"
+    assert (
+        dataset_reference["dataset_target_reference_validation_status"]
+        == "not_claimed"
+    )
+    assert dataset_reference["dataset_binding_proof_hash"]
+    assert (
+        result.summary["dataset_target_reference_validation_status"]
+        == "not_claimed"
+    )
 
 
 def test_random_feature_test_tables_bind_seed_summary_and_ensemble(
@@ -212,7 +226,7 @@ def test_study_rejects_finite_resolution_above_reference_grid(tmp_path: Path) ->
     raw["base_trial"]["output"]["q"] = 9
     write_json(study_path, raw)
     spec = load_study_spec(study_path, repo_root=tmp_path)
-    with pytest.raises(ValueError, match="exceeds the validated target"):
+    with pytest.raises(ValueError, match="exceeds the dataset target"):
         run_study(spec, repo_root=tmp_path)
 
 
@@ -317,7 +331,7 @@ def test_legacy_study_run_manifest_is_rejected_explicitly(tmp_path: Path) -> Non
     result = run_study(spec, repo_root=tmp_path)
     manifest_path = result.path / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["schema_version"] = "pol-study-run-manifest-v1"
+    manifest["schema_version"] = "pol-study-run-manifest-v2"
     write_strict_json(manifest_path, manifest)
 
     with pytest.raises(ValueError, match="unsupported study-run manifest"):

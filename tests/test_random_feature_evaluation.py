@@ -94,6 +94,18 @@ def _synthetic_trial_and_dataset() -> tuple[TrialSpec, ReferenceDataset]:
         target_metadata={"kind": "heat"},
         split_hash="synthetic-split",
         validation_artifact_id="synthetic-validation",
+        binding_kind="foundation_only",
+        binding_status="pass",
+        target_reference_validation_status="not_claimed",
+        binding_proof={
+            "schema_version": "pol-dataset-binding-proof-v1",
+            "binding_kind": "foundation_only",
+            "status": "pass",
+            "target_reference_validation_status": "not_claimed",
+            "certificate_artifact_id": "synthetic-validation",
+            "proof_hash": "synthetic-proof",
+        },
+        binding_proof_hash="synthetic-proof",
     )
     return trial, dataset
 

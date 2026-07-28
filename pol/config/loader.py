@@ -66,6 +66,18 @@ def _prepare_paths(
 
 def _load(model: type[T], path: str | Path, *, repo_root: Path, kind: str) -> T:
     raw = _read(path)
+    schema_version = raw.get("schema_version")
+    if kind == "validation" and schema_version == "pol-validation-v1":
+        raise ValueError(
+            "unsupported legacy validation schema pol-validation-v1; "
+            "migrate to pol-validation-v2 and regenerate the certificate"
+        )
+    if kind == "dataset" and schema_version == "pol-dataset-v1":
+        raise ValueError(
+            "unsupported legacy dataset schema pol-dataset-v1; migrate to "
+            "pol-dataset-v2 and add an explicit validated_reference or "
+            "foundation_only binding"
+        )
     prepared = _prepare_paths(raw, repo_root=repo_root, kind=kind)
     try:
         return model.model_validate(prepared)

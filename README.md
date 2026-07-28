@@ -34,6 +34,10 @@ trial and study execution path.
   back before the first test state solve or test metric.
 - Validation products, datasets, feature states, and completed studies are
   content addressed and verified by exact byte manifests.
+- Content-addressed provenance is distinct from target-reference convergence.
+  Every dataset declares either a `validated_reference` binding to an exact
+  validated candidate suffix or a reason-bearing `foundation_only` binding
+  that explicitly makes no target-reference validation claim.
 - Directory publication is transactional: incomplete staging trees never
   replace a valid artifact or study run.
 
@@ -44,7 +48,7 @@ pol/
 ├── config/       strict, discriminated configuration models and loaders
 ├── math/         periodic grids, spectral resampling, real Fourier maps
 ├── systems/      heat, Burgers, and reaction-diffusion evolution systems
-├── data/         validated reference datasets and finite-resolution views
+├── data/         validation-bound reference datasets and finite-resolution views
 ├── learning/     observations, fixed decoder, ridge, random features, metrics
 ├── validation/   independent algebraic and numerical foundation validation
 ├── study/        unified trial, search, selection, convergence, freeze/test flow
@@ -108,6 +112,9 @@ resampling and Nyquist handling, the real Fourier projector, finite-input/no-
 leak behavior, valid use of `n_tar < J`, fixed-decoder behavior and aliasing,
 and Burgers reference convergence. A passing certificate and master initial-
 condition archive are published under `artifacts/validations/<content-hash>/`.
+The P0-02 certificate records separate machine-readable foundation and Burgers
+target-reference contracts, selected candidate indices, complete ordered
+candidate lists, exact allowed suffixes, and master-archive tensor hashes.
 
 ### 2. Build or reuse a target dataset
 
@@ -115,9 +122,23 @@ condition archive are published under `artifacts/validations/<content-hash>/`.
 python -m pol data build configs/datasets/burgers_smoke.json
 ```
 
-A dataset is built only from a passing validation certificate. Its split IDs,
-reference inputs, reference targets, target-solver metadata, and tensor hashes
-are stored under `artifacts/datasets/<content-hash>/`.
+A dataset is built only from a passing validation certificate and an explicit
+`pol-dataset-v2` binding:
+
+- `validated_reference` requires the target system, invariant PDE parameters,
+  evolution time, dtype, and domain to match the certificate exactly.
+  `reference_nx` and the complete solver/time-candidate dictionary must be
+  exact members of their respective validated candidate suffixes.
+- `foundation_only` reuses only the checked initial-condition foundation and
+  master archive. It requires a nonempty reason and records
+  `target_reference_validation_status=not_claimed`.
+
+The binding proof is evaluated before target evolution. Its proof hash, split
+IDs, reference inputs, reference targets, target-solver metadata, and tensor
+hashes are stored under `artifacts/datasets/<content-hash>/`. For example, the
+Burgers smoke dataset may use `reference_nx=64` after selection at 32 because
+64 is an actual member of the certificate's validated suffix; 48 would be
+rejected even though it is larger than 32.
 
 ### 3. Run a study
 
@@ -183,11 +204,14 @@ finite input at n_tar
     -> reconstructed field and metrics
 ```
 
-The unqualified `field_*` metrics reconstruct the prediction on the
-convergence-validated `n_ref` grid and use that grid as quadrature for the
-continuous periodic `L2` norm. `data_field_*` metrics are also reported on the
-finite `n_tar` target grid. This distinction prevents a change in `n_tar` from
-silently changing the meaning of the principal error metric.
+The unqualified `field_*` metrics reconstruct the prediction on the dataset
+`n_ref` grid and use that grid as quadrature for the continuous periodic `L2`
+norm. Whether that target-reference condition is convergence validated is
+reported separately by the dataset binding status. `data_field_*` metrics are
+also reported on the finite `n_tar` target grid. This distinction prevents a
+change in `n_tar` from silently changing the meaning of the principal error
+metric and prevents a foundation-only heat dataset from being mislabeled as a
+validated heat reference.
 
 A `StudySpec` adds:
 
@@ -269,12 +293,15 @@ confidence level, and interval method are recorded in the primary row.
 `prediction_ensemble` row per selected random-feature model; its metric names
 begin with `test_ensemble_`. Ensemble metrics are not copied into the canonical
 primary metric columns. `run_summary.json` records primary, per-seed, and
-ensemble row counts.
+ensemble row counts. `dataset_reference.json` stores the full dataset binding
+proof, while both it and `run_summary.json` expose the binding kind, binding
+status, target-reference validation status, and proof hash.
 
 The study-run identity, manifest, summary, frozen model archive, selection
-record, and frozen evaluation plan use the P0-01 `v2` contract. Earlier `v1`
-study runs are rejected rather than interpreted with the new primary-result
-semantics. The package version and numerical environment fingerprint also
+record, and frozen evaluation plan use the P0-02 `v3` contract. Earlier `v1`
+and `v2` study runs are rejected rather than interpreted with the new binding
+semantics. Validation and dataset artifacts likewise require their P0-02
+revisions. The package version and numerical environment fingerprint also
 separate new runs from earlier cached identities.
 
 ## Included profiles
@@ -285,6 +312,11 @@ Smoke profiles are intentionally small and are used for integration checks:
 - `surrogate_parameter_time_smoke.json`
 - `observation_output_map_smoke.json`
 - `finite_surrogate_resolution_map_smoke.json`
+
+The Burgers dataset profiles use `validated_reference`. The heat profiles use
+`foundation_only`: they reuse the Burgers certificate's initial-condition
+foundation, but do not claim that Burgers convergence validates the heat
+target solver or reference condition.
 
 The two phase diagrams are deliberately separate. The observation/output map
 varies `J × q` while holding `n_tar` and `n_sur` fixed. The finite/surrogate

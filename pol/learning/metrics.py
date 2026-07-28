@@ -79,12 +79,14 @@ def fourier_prediction_metrics(
 ) -> dict[str, float]:
     """Evaluate a Fourier prediction in coefficient, data, and field space.
 
-    ``field_*`` metrics use the convergence-validated reference grid as a
-    quadrature rule for the continuous periodic :math:`L^2` norm.  The
-    additional ``data_field_*`` metrics compare against the finite
-    ``n_data`` target array supplied to the learning problem.  Keeping both is
-    essential when different ``n_tar`` values are compared: data-space error
-    alone does not see error between the finite target samples.
+    ``field_*`` metrics use the dataset reference grid as a quadrature rule
+    for the continuous periodic :math:`L^2` norm.  Whether target-reference
+    convergence is claimed is carried separately by the dataset validation
+    binding.  The additional ``data_field_*`` metrics compare against the
+    finite ``n_data`` target array supplied to the learning problem.  Keeping
+    both is essential when different ``n_tar`` values are compared:
+    data-space error alone does not see error between the finite target
+    samples.
     """
     if data_field_target.shape[-1] != int(n_data):
         raise ValueError("data_field_target does not match n_data")

@@ -23,7 +23,7 @@ def write_tiny_stack(
     validation_path = write_json(
         root / "validation.json",
         {
-            "schema_version": "pol-validation-v1",
+            "schema_version": "pol-validation-v2",
             "name": "tiny_foundation",
             "artifact_root": str(artifact_root),
             "profile": "test",
@@ -87,10 +87,17 @@ def write_tiny_stack(
     dataset_path = write_json(
         root / "dataset.json",
         {
-            "schema_version": "pol-dataset-v1",
+            "schema_version": "pol-dataset-v2",
             "name": "tiny_heat_dataset",
             "artifact_root": str(artifact_root),
             "validation_spec": str(validation_path),
+            "binding": {
+                "kind": "foundation_only",
+                "reason": (
+                    "Tiny heat tests reuse only the Burgers foundation and do "
+                    "not claim heat target-reference validation."
+                ),
+            },
             "reference_nx": 32,
             "target": {
                 "system": {"kind": "heat", "nu": 0.1},

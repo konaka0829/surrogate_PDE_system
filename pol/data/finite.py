@@ -37,7 +37,7 @@ def derive_finite_view(
     n_ref = int(inputs_reference.shape[-1])
     if n_tar > n_ref:
         raise ValueError(
-            f"n_tar={n_tar} must not exceed the validated reference resolution "
+            f"n_tar={n_tar} must not exceed the dataset reference resolution "
             f"n_ref={n_ref}"
         )
     inputs = spectral_resample_periodic(

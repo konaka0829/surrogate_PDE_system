@@ -16,6 +16,10 @@ def test_cli_validate_data_run_and_verify(tmp_path: Path, capsys) -> None:
     assert main(["data", "build", str(dataset_path)]) == 0
     dataset = json.loads(capsys.readouterr().out)
     assert dataset["status"] == "pass"
+    assert dataset["binding_kind"] == "foundation_only"
+    assert dataset["binding_status"] == "pass"
+    assert dataset["target_reference_validation_status"] == "not_claimed"
+    assert dataset["binding_proof_hash"]
 
     assert main(["run", str(study_path), "--plan"]) == 0
     plan = json.loads(capsys.readouterr().out)
@@ -24,6 +28,10 @@ def test_cli_validate_data_run_and_verify(tmp_path: Path, capsys) -> None:
     assert main(["run", str(study_path)]) == 0
     run = json.loads(capsys.readouterr().out)
     assert run["status"] == "pass"
+    assert (
+        run["summary"]["dataset_target_reference_validation_status"]
+        == "not_claimed"
+    )
 
     assert main(["verify", run["path"]]) == 0
     verified = json.loads(capsys.readouterr().out)

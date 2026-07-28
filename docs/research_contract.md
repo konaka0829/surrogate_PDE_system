@@ -14,7 +14,7 @@ finite-information pipeline, not as recovery of discarded reference modes.
 
 | Symbol | Owner | Meaning |
 |---|---|---|
-| `n_ref` | validated dataset specification and artifact | reference grid used to generate and evaluate the reference field |
+| `n_ref` | validation-bound dataset specification and artifact | reference grid used to generate and evaluate the reference field |
 | `n_tar` | finite-input specification | finite data grid exposed at the learning interface |
 | `n_sur` | feature-generator specification | internal grid of the surrogate evolution or static feature state |
 | `J` | observation specification | number of observed feature values |
@@ -49,9 +49,41 @@ The encoding and surrogate computation must never inspect the original
 interface. Two reference inputs that induce the same finite `n_tar` input must
 induce the same surrogate initial state.
 
-The convergence-validated `n_ref` target is reserved for reference-field
-evaluation and quadrature. Training targets are the configured `q` coefficients
-derived from the finite `n_tar` target.
+The dataset `n_ref` target is reserved for reference-field evaluation and
+quadrature. Training targets are the configured `q` coefficients derived from
+the finite `n_tar` target. A target-reference convergence claim is valid only
+when the dataset carries a passing `validated_reference` proof; the same grid
+role in a `foundation_only` dataset does not imply such a claim.
+
+## Validation binding and provenance
+
+Content-addressed provenance proves which bytes and upstream identities were
+used. It does not, by itself, prove that a requested target-reference
+condition was numerically convergence validated. Every `pol-dataset-v2`
+configuration must therefore select exactly one binding:
+
+- `validated_reference` binds the dataset target to the certificate's target
+  system kind, invariant PDE parameters, evolution time, dtype, and domain by
+  canonical exact equality. The dataset `reference_nx` must be an actual
+  candidate at or after the selected reference candidate. Its
+  solver/`dt`/`fine_dt`/dealias dictionary must likewise be an actual candidate
+  at or after the selected time candidate.
+- `foundation_only` binds only to the passing general foundation checks,
+  sample/split/seed and initial-condition contract, domain, dtype, and master
+  initial-condition archive identity and capacity. It requires a nonempty
+  reason and fixes `target_reference_validation_status` to `not_claimed`.
+
+Candidate order and the selected indices are part of the certificate. The
+allowed relation is exact membership in the recorded suffix, not an inequality
+rule: a larger unlisted resolution or a smaller unlisted time step is not
+accepted. A foundation-only proof cannot be upgraded, aliased, or used as a
+fallback for `validated_reference`.
+
+The binding proof is constructed before any dataset target evolution. The
+canonical proof and its hash are part of the dataset identity and are copied
+to the resolved specification, metadata, tensor archive, loaded dataset, and
+downstream study identity/reference/summary. Verifiers reject disagreement
+between these copies.
 
 ## Split and freeze protocol
 
@@ -81,8 +113,9 @@ Field-space error and data-space error are different scientific quantities and
 must be stored separately.
 
 - Unqualified `field_*` metrics compare a `q`-coefficient reconstruction with
-  the convergence-validated target on `n_ref`, using that grid for periodic
-  field quadrature.
+  the dataset target on `n_ref`, using that grid for periodic field quadrature.
+  The separate dataset binding says whether convergence validation of that
+  target-reference condition is claimed.
 - `data_field_*` metrics compare the same prediction with the finite target on
   `n_tar`.
 

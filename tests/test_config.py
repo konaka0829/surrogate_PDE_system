@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pol.config.loader import load_study_spec
+from pol.config.loader import load_dataset_spec, load_study_spec, load_validation_spec
 from pol.config.models import (
     InterfaceDimensionsSpec,
     RandomFeatureRidgeReadoutSpec,
@@ -137,3 +137,63 @@ def test_random_feature_readout_rejects_selection_evaluation_overlap() -> None:
                 evaluation_seeds=[12, 21],
             )
         )
+
+
+def test_dataset_binding_rejects_unknown_key(tmp_path: Path) -> None:
+    _, dataset_path, _ = write_tiny_stack(tmp_path)
+    raw = json.loads(dataset_path.read_text(encoding="utf-8"))
+    raw["binding"]["unknown"] = True
+    dataset_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\$\.binding.*unknown"):
+        load_dataset_spec(dataset_path, repo_root=tmp_path)
+
+
+def test_foundation_only_binding_requires_nonempty_reason(tmp_path: Path) -> None:
+    _, dataset_path, _ = write_tiny_stack(tmp_path)
+    raw = json.loads(dataset_path.read_text(encoding="utf-8"))
+    raw["binding"].pop("reason")
+    dataset_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\$\.binding.*reason"):
+        load_dataset_spec(dataset_path, repo_root=tmp_path)
+
+    raw["binding"]["reason"] = "   "
+    dataset_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="must not be blank"):
+        load_dataset_spec(dataset_path, repo_root=tmp_path)
+
+
+def test_legacy_dataset_schema_has_actionable_migration_error(
+    tmp_path: Path,
+) -> None:
+    _, dataset_path, _ = write_tiny_stack(tmp_path)
+    raw = json.loads(dataset_path.read_text(encoding="utf-8"))
+    raw["schema_version"] = "pol-dataset-v1"
+    dataset_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported legacy dataset schema"):
+        load_dataset_spec(dataset_path, repo_root=tmp_path)
+
+
+def test_checked_in_dataset_bindings_are_target_specific() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    load_validation_spec(
+        repo_root / "configs/validation/foundation_smoke.json",
+        repo_root=repo_root,
+    )
+    load_validation_spec(
+        repo_root / "configs/validation/foundation_main.json",
+        repo_root=repo_root,
+    )
+    expected = {
+        "burgers_smoke.json": ("validated_reference", None),
+        "burgers_main.json": ("validated_reference", None),
+        "heat_smoke.json": ("foundation_only", "reason"),
+        "heat_main.json": ("foundation_only", "reason"),
+    }
+    for name, (kind, reason_field) in expected.items():
+        spec = load_dataset_spec(
+            repo_root / "configs/datasets" / name,
+            repo_root=repo_root,
+        )
+        assert spec.binding.kind == kind
+        if reason_field is not None:
+            assert spec.binding.reason.strip()

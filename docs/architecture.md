@@ -59,16 +59,18 @@ as a baseline, using the same cache, observation, readout, and evaluation path.
 The target side retains both representations derived from the same sample ID:
 
 ```text
-validated target at n_ref
+validation-bound dataset target at n_ref
   ├─> finite target data at n_tar
   └─> reference field used only for quadrature/evaluation
 ```
 
 Readouts are fitted to the `q` coefficients extracted from finite target data.
 The principal `field_*` metric reconstructs those coefficients on `n_ref` and
-compares with the validated reference target. A separate `data_field_*` metric
-is reported on `n_tar`. Consequently, a resolution sweep does not redefine the
-metric merely by changing its finite target grid.
+compares with the dataset reference target. A separate `data_field_*` metric is
+reported on `n_tar`. The dataset's explicit binding proof separately records
+whether this target-reference condition is validated or merely uses a checked
+foundation. Consequently, a resolution sweep does not redefine the metric
+merely by changing its finite target grid.
 
 ## 4. Unified execution
 

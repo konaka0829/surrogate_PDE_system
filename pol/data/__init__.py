@@ -1,4 +1,4 @@
-"""Validated reference datasets and finite-resolution views."""
+"""Validation-bound reference datasets and finite-resolution views."""
 
 from .dataset import ReferenceDataset, ensure_dataset, load_dataset
 from .finite import FiniteDataView, build_feature_initial_state, derive_finite_view

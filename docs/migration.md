@@ -11,7 +11,7 @@ The refactor replaces that organization as follows.
 | Former responsibility | Current responsibility |
 |---|---|
 | numbered foundation experiment | `pol.validation` and ordinary unit tests |
-| experiment-specific target archive | `pol.data` validated reference dataset |
+| experiment-specific target archive | `pol.data` explicitly validation-bound reference dataset |
 | heat calibration runner | generic study + heat diagnostic |
 | surrogate parameter/time runner | generic study + coordinate search |
 | scalar runner | one-cell `StudySpec` |
