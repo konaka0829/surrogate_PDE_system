@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import itertools
+import math
 from typing import Any, Mapping
 
+from scipy.stats import t as student_t
 import torch
 
 from pol.config.models import (
@@ -40,8 +42,25 @@ class CandidateEvaluation:
 
 @dataclass(frozen=True)
 class TestEvaluation:
-    aggregate_row: dict[str, Any]
+    primary_row: dict[str, Any]
     seed_rows: tuple[dict[str, Any], ...]
+    ensemble_row: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class FrozenPredictions:
+    """Predictions from a frozen deterministic model or random realizations."""
+
+    single_model_prediction: torch.Tensor | None
+    per_seed_predictions: tuple[tuple[int, torch.Tensor], ...]
+
+    def prediction_ensemble(self) -> torch.Tensor:
+        """Explicitly form the prediction-average ensemble over random seeds."""
+        if not self.per_seed_predictions:
+            raise ValueError("prediction ensemble requires per-seed predictions")
+        return torch.stack(
+            [prediction for _, prediction in self.per_seed_predictions], dim=0
+        ).mean(0)
 
 
 def trial_parameters(trial: TrialSpec) -> dict[str, Any]:
@@ -91,6 +110,33 @@ def _mean_metrics(items: list[dict[str, float]]) -> dict[str, float]:
         key: sum(float(item[key]) for item in items) / len(items)
         for key in items[0]
     }
+
+
+def summarize_independent_seed_metrics(
+    items: list[dict[str, float]],
+) -> dict[str, float]:
+    """Summarize per-seed metrics with a two-sided Student-t mean interval."""
+    if len(items) < 2:
+        raise ValueError("at least two seed metric rows are required")
+    confidence_level = 0.95
+    keys = tuple(items[0])
+    if any(tuple(item) != keys for item in items[1:]):
+        raise ValueError("per-seed metric rows must have identical ordered keys")
+    count = len(items)
+    critical = float(student_t.ppf(0.5 + confidence_level / 2.0, count - 1))
+    summary: dict[str, float] = {}
+    for key in keys:
+        values = [float(item[key]) for item in items]
+        mean = math.fsum(values) / count
+        variance = math.fsum((value - mean) ** 2 for value in values) / (count - 1)
+        standard_deviation = math.sqrt(variance)
+        margin = critical * standard_deviation / math.sqrt(count)
+        summary[key] = mean
+        summary[f"{key}_seed_mean"] = mean
+        summary[f"{key}_seed_std"] = standard_deviation
+        summary[f"{key}_seed_ci95_low"] = mean - margin
+        summary[f"{key}_seed_ci95_high"] = mean + margin
+    return summary
 
 
 def _evaluate_coefficients(
@@ -158,18 +204,18 @@ def predict_frozen(
     *,
     q: int,
     domain_length: float,
-) -> tuple[torch.Tensor, list[tuple[int | None, torch.Tensor]]]:
+) -> FrozenPredictions:
     kind = model["kind"]
     if kind == "direct_fourier_decoder":
         prediction = decode_point_observation_to_real_fourier(
             features, q, domain_length=domain_length
         )
-        return prediction, [(None, prediction)]
+        return FrozenPredictions(prediction, ())
     if kind == "affine_ridge":
         prediction = _predict_affine(model, features)
-        return prediction, [(None, prediction)]
+        return FrozenPredictions(prediction, ())
     if kind == "random_feature_ridge":
-        predictions: list[tuple[int | None, torch.Tensor]] = []
+        predictions: list[tuple[int, torch.Tensor]] = []
         for member in model["members"]:
             random_map = RandomFeatureMap(
                 A=member["A"],
@@ -182,8 +228,7 @@ def predict_frozen(
             lifted = random_map(features.to(member["A"].device, member["A"].dtype))
             prediction = _predict_affine(member, lifted)
             predictions.append((int(member["seed"]), prediction))
-        aggregate = torch.stack([value for _, value in predictions], dim=0).mean(0)
-        return aggregate, predictions
+        return FrozenPredictions(None, tuple(predictions))
     raise ValueError(f"unknown frozen model kind: {kind}")
 
 
@@ -494,19 +539,10 @@ class TrialEngine:
             domain_length=self.dataset.domain_length,
             l2_scale=trial.feature.observation.l2_scale,
         )
-        aggregate_prediction, seed_predictions = predict_frozen(
+        predictions = predict_frozen(
             model,
             features,
             q=int(trial.output.q),
-            domain_length=self.dataset.domain_length,
-        )
-        metrics = _evaluate_coefficients(
-            aggregate_prediction,
-            finite.target_coefficients,
-            finite.targets,
-            finite.targets_reference,
-            n_tar=int(trial.input.n_tar),
-            n_ref=finite.n_ref,
             domain_length=self.dataset.domain_length,
         )
         floor = _representation_floor(
@@ -517,17 +553,16 @@ class TrialEngine:
             n_ref=finite.n_ref,
             domain_length=self.dataset.domain_length,
         )
-        row = {
+        base_row = {
             "candidate_id": candidate_id,
             "readout_id": readout_id,
             **trial_parameters(trial),
-            **_prefix(metrics, "test"),
-            **_prefix(floor, "test"),
             "feature_cache_id": state.cache_id,
         }
-        seed_rows: list[dict[str, Any]] = []
         if model["kind"] == "random_feature_ridge":
-            for seed, prediction in seed_predictions:
+            seed_rows: list[dict[str, Any]] = []
+            seed_metrics: list[dict[str, float]] = []
+            for seed, prediction in predictions.per_seed_predictions:
                 seed_metric = _evaluate_coefficients(
                     prediction,
                     finite.target_coefficients,
@@ -537,13 +572,69 @@ class TrialEngine:
                     n_ref=finite.n_ref,
                     domain_length=self.dataset.domain_length,
                 )
+                prefixed_seed_metric = {
+                    **_prefix(seed_metric, "test"),
+                    **_prefix(floor, "test"),
+                }
+                seed_metrics.append(prefixed_seed_metric)
                 seed_rows.append(
                     {
-                        "candidate_id": candidate_id,
-                        "readout_id": readout_id,
+                        **base_row,
                         "seed": seed,
-                        **trial_parameters(trial),
-                        **_prefix(seed_metric, "test"),
+                        "test_result_kind": "independent_seed_realization",
+                        **prefixed_seed_metric,
                     }
                 )
-        return TestEvaluation(row, tuple(seed_rows))
+            primary_row = {
+                **base_row,
+                "test_result_kind": "independent_seed_metric_summary",
+                "test_seed_count": len(seed_rows),
+                "test_seed_std_ddof": 1,
+                "test_confidence_level": 0.95,
+                "test_confidence_interval_method": "student_t",
+                **summarize_independent_seed_metrics(seed_metrics),
+            }
+            ensemble_prediction = predictions.prediction_ensemble()
+            ensemble_metrics = _evaluate_coefficients(
+                ensemble_prediction,
+                finite.target_coefficients,
+                finite.targets,
+                finite.targets_reference,
+                n_tar=int(trial.input.n_tar),
+                n_ref=finite.n_ref,
+                domain_length=self.dataset.domain_length,
+            )
+            ensemble_row = {
+                **base_row,
+                "test_result_kind": "prediction_ensemble",
+                "ensemble_member_count": len(seed_rows),
+                **_prefix(ensemble_metrics, "test_ensemble"),
+            }
+            return TestEvaluation(
+                primary_row=primary_row,
+                seed_rows=tuple(seed_rows),
+                ensemble_row=ensemble_row,
+            )
+
+        if predictions.single_model_prediction is None:
+            raise ValueError("deterministic frozen model returned no prediction")
+        metrics = _evaluate_coefficients(
+            predictions.single_model_prediction,
+            finite.target_coefficients,
+            finite.targets,
+            finite.targets_reference,
+            n_tar=int(trial.input.n_tar),
+            n_ref=finite.n_ref,
+            domain_length=self.dataset.domain_length,
+        )
+        primary_row = {
+            **base_row,
+            "test_result_kind": "single_model",
+            **_prefix(metrics, "test"),
+            **_prefix(floor, "test"),
+        }
+        return TestEvaluation(
+            primary_row=primary_row,
+            seed_rows=(),
+            ensemble_row=None,
+        )

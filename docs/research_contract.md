@@ -96,6 +96,13 @@ primary result must aggregate **per-seed metrics**, reporting at least their
 mean, standard deviation, and a stated confidence interval. The interval
 method and the number of seeds must be recorded.
 
+At least two distinct evaluation seeds are required. For seed metrics
+\(m_1,\ldots,m_S\), the implemented primary summary is the arithmetic mean,
+the Bessel-corrected sample standard deviation
+\(\sqrt{\sum_s(m_s-\bar m)^2/(S-1)}\), and the two-sided 95% Student-t interval
+\(\bar m \mathbin{\pm} t_{0.975,S-1}s/\sqrt{S}\). Interval endpoints are not
+clamped.
+
 Averaging predictions over seeds defines an ensemble model. Ensemble metrics
 may be reported as a separate result, but they must not be labeled or used as
 the primary independent-realization result.

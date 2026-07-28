@@ -119,12 +119,18 @@ def noise_robustness_rows(
                 device="cpu",
             ).to(features.device)
             noisy = features + float(level) * rms * noise
-            prediction, _ = predict_frozen(
+            predictions = predict_frozen(
                 model,
                 noisy,
                 q=int(trial.output.q),
                 domain_length=dataset.domain_length,
             )
+            if predictions.single_model_prediction is not None:
+                prediction = predictions.single_model_prediction
+                prediction_semantics = "single_model"
+            else:
+                prediction = predictions.prediction_ensemble()
+                prediction_semantics = "prediction_ensemble"
             metrics.append(
                 fourier_prediction_metrics(
                     prediction,
@@ -141,6 +147,7 @@ def noise_robustness_rows(
             "readout_id": readout_id,
             "noise_level": float(level),
             "repeats": int(diagnostic.repeats),
+            "prediction_semantics": prediction_semantics,
         }
         for key in metrics[0]:
             row[key] = sum(item[key] for item in metrics) / len(metrics)

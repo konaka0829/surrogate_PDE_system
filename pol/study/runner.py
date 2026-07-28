@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import itertools
 import json
+import math
 from pathlib import Path
 import shutil
 from typing import Any, Iterable, Mapping
@@ -28,7 +29,11 @@ from .convergence import check_convergence
 from .diagnostics import heat_multiplier_rows, noise_robustness_rows
 from .overrides import apply_trial_overrides
 from .search import SearchOutcome, run_search
-from .trial import CandidateEvaluation, TrialEngine
+from .trial import (
+    CandidateEvaluation,
+    TrialEngine,
+    summarize_independent_seed_metrics,
+)
 
 
 @dataclass(frozen=True)
@@ -162,6 +167,10 @@ def _row_fields(rows: Iterable[Mapping[str, Any]]) -> list[str]:
         "readout_id",
         "readout_kind",
         "selected",
+        "test_result_kind",
+        "seed",
+        "test_seed_count",
+        "ensemble_member_count",
         "feature_system",
         "feature_nu",
         "feature_time",
@@ -210,11 +219,44 @@ def _run_manifest(root: Path, *, identity: Mapping[str, Any]) -> None:
     write_strict_json(
         root / "manifest.json",
         {
-            "schema_version": "pol-study-run-manifest-v1",
+            "schema_version": "pol-study-run-manifest-v2",
             "identity": dict(identity),
             "files": manifest_records(root, names),
         },
     )
+
+
+def _test_evaluation_contract() -> dict[str, Any]:
+    return {
+        "schema_version": "pol-test-evaluation-contract-v1",
+        "random_feature_primary": "independent_seed_metric_summary",
+        "random_feature_seed_result": "independent_seed_realization",
+        "random_feature_ensemble_result": "prediction_ensemble",
+        "seed_standard_deviation_ddof": 1,
+        "confidence_level": 0.95,
+        "confidence_interval_method": "student_t",
+    }
+
+
+def _row_binding(row: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+    return (
+        row.get("case_id"),
+        row.get("readout_id"),
+        row.get("candidate_id"),
+    )
+
+
+def _has_csv_value(row: Mapping[str, Any], key: str) -> bool:
+    return key in row and row.get(key) not in ("", None)
+
+
+def _require_close(actual: Any, expected: float, *, label: str) -> None:
+    try:
+        value = float(actual)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} is not numeric") from exc
+    if not math.isclose(value, expected, rel_tol=1e-12, abs_tol=1e-15):
+        raise ValueError(f"{label} does not match the per-seed metrics")
 
 
 def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
@@ -229,7 +271,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError("resolved study does not match manifest identity")
 
     summary = json.loads((root / "run_summary.json").read_text(encoding="utf-8"))
-    if summary.get("schema_version") != "pol-study-run-summary-v1":
+    if summary.get("schema_version") != "pol-study-run-summary-v2":
         raise ValueError("unsupported study-run summary schema")
     if summary.get("run_hash") != run_hash:
         raise ValueError("study-run summary hash does not match manifest identity")
@@ -241,7 +283,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     selection = json.loads(
         (root / "selection_record.json").read_text(encoding="utf-8")
     )
-    if selection.get("schema_version") != "pol-selection-record-v1":
+    if selection.get("schema_version") != "pol-selection-record-v2":
         raise ValueError("unsupported selection-record schema")
     _assert_selection_record_safe(selection)
     if selection.get("test_data_used") is not False:
@@ -253,7 +295,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     plan = json.loads(
         (root / "frozen_evaluation_plan.json").read_text(encoding="utf-8")
     )
-    if plan.get("schema_version") != "pol-frozen-evaluation-plan-v1":
+    if plan.get("schema_version") != "pol-frozen-evaluation-plan-v2":
         raise ValueError("unsupported frozen evaluation plan schema")
     stored_plan_hash = plan.pop("plan_content_hash", None)
     computed_plan_hash = stable_object_hash(plan)
@@ -266,6 +308,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         raise ValueError("frozen plan selection binding mismatch")
     if summary.get("frozen_plan_hash") != stored_plan_hash:
         raise ValueError("run summary frozen-plan hash mismatch")
+    if plan.get("test_evaluation_contract") != _test_evaluation_contract():
+        raise ValueError("unsupported frozen test-evaluation contract")
 
     dataset_reference = json.loads(
         (root / "dataset_reference.json").read_text(encoding="utf-8")
@@ -288,7 +332,7 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     if file_sha256(model_path) != plan.get("frozen_models_sha256"):
         raise ValueError("frozen model archive hash mismatch")
     archive = torch.load(model_path, map_location="cpu", weights_only=True)
-    if archive.get("schema_version") != "pol-frozen-model-archive-v1":
+    if archive.get("schema_version") != "pol-frozen-model-archive-v2":
         raise ValueError("unsupported frozen model archive schema")
     if archive.get("selection_record_hash") != selection_hash:
         raise ValueError("frozen model archive selection binding mismatch")
@@ -309,15 +353,29 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         for entry in models.values()
         if isinstance(entry, Mapping)
     }
-    if actual != expected:
+    if actual != expected or len(actual) != len(models):
         raise ValueError("frozen model archive does not match selected candidates")
+    model_by_binding = {
+        (
+            entry["case_id"],
+            entry["readout_id"],
+            entry["candidate_id"],
+        ): entry["model"]
+        for entry in models.values()
+    }
 
     validation_rows = _load_rows(root / "validation_trials.csv")
     test_rows = _load_rows(root / "test_metrics.csv")
+    seed_rows = _load_rows(root / "random_feature_seed_metrics.csv")
+    ensemble_rows = _load_rows(root / "random_feature_ensemble_metrics.csv")
     if summary.get("validation_row_count") != len(validation_rows):
         raise ValueError("run summary validation-row count mismatch")
-    if summary.get("test_row_count") != len(test_rows):
-        raise ValueError("run summary test-row count mismatch")
+    if summary.get("primary_test_row_count") != len(test_rows):
+        raise ValueError("run summary primary-test-row count mismatch")
+    if summary.get("random_feature_seed_row_count") != len(seed_rows):
+        raise ValueError("run summary random-feature-seed-row count mismatch")
+    if summary.get("random_feature_ensemble_row_count") != len(ensemble_rows):
+        raise ValueError("run summary random-feature-ensemble-row count mismatch")
     selected_validation = {
         (row.get("case_id"), row.get("readout_id"), row.get("candidate_id"))
         for row in validation_rows
@@ -331,13 +389,171 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     }
     if len(test_rows) != len(expected) or actual_test_rows != expected:
         raise ValueError("test rows do not match frozen candidates")
-    for row in test_rows:
+
+    def verify_test_binding(row: Mapping[str, Any], *, table: str) -> None:
         if str(row.get("selected", "")).lower() != "true":
-            raise ValueError("test row is not marked as selected")
+            raise ValueError(f"{table} row is not marked as selected")
         if row.get("selection_record_hash") != selection_hash:
-            raise ValueError("test row selection binding mismatch")
+            raise ValueError(f"{table} row selection binding mismatch")
         if row.get("frozen_plan_hash") != stored_plan_hash:
-            raise ValueError("test row frozen-plan binding mismatch")
+            raise ValueError(f"{table} row frozen-plan binding mismatch")
+
+    seed_rows_by_binding: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
+    for row in seed_rows:
+        verify_test_binding(row, table="random-feature seed")
+        seed_rows_by_binding.setdefault(_row_binding(row), []).append(row)
+    ensemble_rows_by_binding: dict[
+        tuple[Any, Any, Any], list[dict[str, Any]]
+    ] = {}
+    for row in ensemble_rows:
+        verify_test_binding(row, table="random-feature ensemble")
+        ensemble_rows_by_binding.setdefault(_row_binding(row), []).append(row)
+
+    random_bindings = {
+        binding
+        for binding, model in model_by_binding.items()
+        if isinstance(model, Mapping) and model.get("kind") == "random_feature_ridge"
+    }
+    if set(seed_rows_by_binding) != random_bindings:
+        raise ValueError("per-seed rows do not match frozen random-feature models")
+    if set(ensemble_rows_by_binding) != random_bindings:
+        raise ValueError("ensemble rows do not match frozen random-feature models")
+
+    seed_summary_suffixes = (
+        "_seed_mean",
+        "_seed_std",
+        "_seed_ci95_low",
+        "_seed_ci95_high",
+    )
+    seed_metadata_fields = (
+        "test_seed_count",
+        "test_seed_std_ddof",
+        "test_confidence_level",
+        "test_confidence_interval_method",
+    )
+    for row in test_rows:
+        verify_test_binding(row, table="primary test")
+        binding = _row_binding(row)
+        model = model_by_binding[binding]
+        if not isinstance(model, Mapping):
+            raise ValueError("frozen model entry is not an object")
+        if model.get("kind") != "random_feature_ridge":
+            if row.get("test_result_kind") != "single_model":
+                raise ValueError("deterministic primary row has the wrong result kind")
+            if any(_has_csv_value(row, key) for key in seed_metadata_fields):
+                raise ValueError("single-model primary row has false seed uncertainty")
+            if any(
+                _has_csv_value(row, key)
+                for key in row
+                if key.endswith(seed_summary_suffixes)
+            ):
+                raise ValueError("single-model primary row has false seed summary")
+            continue
+
+        if row.get("test_result_kind") != "independent_seed_metric_summary":
+            raise ValueError("random-feature primary row has the wrong result kind")
+        members = model.get("members")
+        if not isinstance(members, list) or len(members) < 2:
+            raise ValueError("frozen random-feature model has too few members")
+        member_seeds = [int(member["seed"]) for member in members]
+        if len(member_seeds) != len(set(member_seeds)):
+            raise ValueError("frozen random-feature member seeds are not unique")
+        matching_seed_rows = seed_rows_by_binding[binding]
+        try:
+            row_seeds = [int(seed_row["seed"]) for seed_row in matching_seed_rows]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("per-seed row has an invalid seed") from exc
+        if len(matching_seed_rows) != len(member_seeds):
+            raise ValueError("per-seed row count does not match frozen members")
+        if len(row_seeds) != len(set(row_seeds)) or set(row_seeds) != set(member_seeds):
+            raise ValueError("per-seed IDs do not match frozen member seeds")
+        if int(row.get("test_seed_count", -1)) != len(member_seeds):
+            raise ValueError("primary seed count does not match frozen members")
+        if int(row.get("test_seed_std_ddof", -1)) != 1:
+            raise ValueError("primary seed standard-deviation ddof is not one")
+        _require_close(
+            row.get("test_confidence_level"),
+            0.95,
+            label="primary confidence level",
+        )
+        if row.get("test_confidence_interval_method") != "student_t":
+            raise ValueError("primary confidence interval method is not Student-t")
+        if any(
+            seed_row.get("test_result_kind") != "independent_seed_realization"
+            for seed_row in matching_seed_rows
+        ):
+            raise ValueError("per-seed row has the wrong result kind")
+
+        first_seed_row = matching_seed_rows[0]
+        metric_keys = tuple(
+            sorted(
+                key
+                for key, value in first_seed_row.items()
+                if key.startswith("test_")
+                and key != "test_result_kind"
+                and value not in ("", None)
+            )
+        )
+        if not metric_keys:
+            raise ValueError("per-seed row has no test metrics")
+        metric_items: list[dict[str, float]] = []
+        for seed_row in matching_seed_rows:
+            active_keys = tuple(
+                sorted(
+                    key
+                    for key, value in seed_row.items()
+                    if key.startswith("test_")
+                    and key != "test_result_kind"
+                    and value not in ("", None)
+                )
+            )
+            if active_keys != metric_keys:
+                raise ValueError("per-seed rows have inconsistent metric fields")
+            try:
+                metric_items.append(
+                    {key: float(seed_row[key]) for key in metric_keys}
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError("per-seed metric is not numeric") from exc
+        expected_summary = summarize_independent_seed_metrics(metric_items)
+        for key, expected_value in expected_summary.items():
+            _require_close(
+                row.get(key),
+                expected_value,
+                label=f"primary metric {key}",
+            )
+        for key in metric_keys:
+            _require_close(
+                row.get(key),
+                float(row[f"{key}_seed_mean"]),
+                label=f"canonical metric {key}",
+            )
+
+        matching_ensemble_rows = ensemble_rows_by_binding[binding]
+        if len(matching_ensemble_rows) != 1:
+            raise ValueError("random-feature model must have exactly one ensemble row")
+        ensemble_row = matching_ensemble_rows[0]
+        if ensemble_row.get("test_result_kind") != "prediction_ensemble":
+            raise ValueError("ensemble row has the wrong result kind")
+        if int(ensemble_row.get("ensemble_member_count", -1)) != len(member_seeds):
+            raise ValueError("ensemble member count does not match frozen members")
+        expected_ensemble_keys = {
+            key.replace("test_", "test_ensemble_", 1)
+            for key in metric_keys
+            if "representation_floor" not in key
+        }
+        actual_ensemble_keys = {
+            key
+            for key, value in ensemble_row.items()
+            if key.startswith("test_ensemble_") and value not in ("", None)
+        }
+        if actual_ensemble_keys != expected_ensemble_keys:
+            raise ValueError("ensemble metric fields do not match prediction metrics")
+        try:
+            for key in actual_ensemble_keys:
+                float(ensemble_row[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ensemble metric is not numeric") from exc
 
     events = json.loads((root / "events.json").read_text(encoding="utf-8"))
     names = [item.get("event") for item in events if isinstance(item, Mapping)]
@@ -379,7 +595,7 @@ def verify_study_run(path: Path | str) -> dict[str, Any]:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise ValueError("study run has no manifest")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "pol-study-run-manifest-v1":
+    if manifest.get("schema_version") != "pol-study-run-manifest-v2":
         raise ValueError("unsupported study-run manifest")
     expected_records = manifest.get("files")
     if not isinstance(expected_records, list):
@@ -500,7 +716,7 @@ def run_study(
             "operator-learning studies require nonempty validation and test splits"
         )
     identity = {
-        "schema_version": "pol-study-run-identity-v1",
+        "schema_version": "pol-study-run-identity-v2",
         "environment": numerical_environment_fingerprint(),
         "study": _scientific_spec(spec),
         "dataset_artifact_id": dataset.artifact_id,
@@ -631,7 +847,7 @@ def run_study(
         )
 
     selection_record = {
-        "schema_version": "pol-selection-record-v1",
+        "schema_version": "pol-selection-record-v2",
         "study": spec.name,
         "profile": spec.profile,
         "dataset_artifact_id": dataset.artifact_id,
@@ -666,7 +882,7 @@ def run_study(
                 "model": evaluation.frozen_models[readout_id],
             }
     frozen_archive = {
-        "schema_version": "pol-frozen-model-archive-v1",
+        "schema_version": "pol-frozen-model-archive-v2",
         "selection_record_hash": selection_hash,
         "models": frozen_models,
     }
@@ -701,7 +917,7 @@ def run_study(
         atomic_torch_save(staging / "frozen_models.pt", frozen_archive)
         model_file_hash = file_sha256(staging / "frozen_models.pt")
         frozen_plan = {
-            "schema_version": "pol-frozen-evaluation-plan-v1",
+            "schema_version": "pol-frozen-evaluation-plan-v2",
             "study": spec.name,
             "dataset_artifact_id": dataset.artifact_id,
             "dataset_split_hash": dataset.split_hash,
@@ -717,6 +933,7 @@ def run_study(
                 }
                 for case_id, value in selection_cases.items()
             },
+            "test_evaluation_contract": _test_evaluation_contract(),
             "test_data_used": False,
         }
         frozen_plan_hash = stable_object_hash(frozen_plan)
@@ -740,6 +957,8 @@ def run_study(
             raise ValueError("frozen plan split binding mismatch")
         if loaded_plan.get("selection_record_hash") != selection_hash:
             raise ValueError("frozen plan selection binding mismatch")
+        if loaded_plan.get("test_evaluation_contract") != _test_evaluation_contract():
+            raise ValueError("frozen plan test-evaluation contract mismatch")
         if file_sha256(staging / loaded_plan["frozen_models_file"]) != loaded_plan[
             "frozen_models_sha256"
         ]:
@@ -749,7 +968,7 @@ def run_study(
             map_location="cpu",
             weights_only=True,
         )
-        if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v1":
+        if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v2":
             raise ValueError("unsupported frozen model archive schema")
         if loaded_archive.get("selection_record_hash") != selection_hash:
             raise ValueError("frozen model archive selection binding mismatch")
@@ -757,6 +976,7 @@ def run_study(
 
         test_rows: list[dict[str, Any]] = []
         random_seed_rows: list[dict[str, Any]] = []
+        random_ensemble_rows: list[dict[str, Any]] = []
         first_test = True
         for entry in loaded_archive["models"].values():
             if first_test:
@@ -781,7 +1001,7 @@ def run_study(
                 "selected": True,
                 "selection_record_hash": selection_hash,
                 "frozen_plan_hash": frozen_plan_hash,
-                **evaluated.aggregate_row,
+                **evaluated.primary_row,
             }
             test_rows.append(row)
             random_seed_rows.extend(
@@ -795,6 +1015,17 @@ def run_study(
                 }
                 for seed_row in evaluated.seed_rows
             )
+            if evaluated.ensemble_row is not None:
+                random_ensemble_rows.append(
+                    {
+                        "case_id": entry["case_id"],
+                        "variant_id": entry["variant_id"],
+                        "selected": True,
+                        "selection_record_hash": selection_hash,
+                        "frozen_plan_hash": frozen_plan_hash,
+                        **evaluated.ensemble_row,
+                    }
+                )
         write_csv(
             staging / "test_metrics.csv",
             test_rows,
@@ -804,6 +1035,11 @@ def run_study(
             staging / "random_feature_seed_metrics.csv",
             random_seed_rows,
             fieldnames=_row_fields(random_seed_rows),
+        )
+        write_csv(
+            staging / "random_feature_ensemble_metrics.csv",
+            random_ensemble_rows,
+            fieldnames=_row_fields(random_ensemble_rows),
         )
 
         multiplier_rows: list[dict[str, Any]] = []
@@ -862,7 +1098,7 @@ def run_study(
                 output_dir=staging / "figures",
             )
         summary = {
-            "schema_version": "pol-study-run-summary-v1",
+            "schema_version": "pol-study-run-summary-v2",
             "status": "pass",
             "study": spec.name,
             "profile": spec.profile,
@@ -870,7 +1106,9 @@ def run_study(
             "dataset_artifact_id": dataset.artifact_id,
             "case_count": len(cases),
             "validation_row_count": len(validation_rows),
-            "test_row_count": len(test_rows),
+            "primary_test_row_count": len(test_rows),
+            "random_feature_seed_row_count": len(random_seed_rows),
+            "random_feature_ensemble_row_count": len(random_ensemble_rows),
             "selection_record_hash": selection_hash,
             "frozen_plan_hash": frozen_plan_hash,
             "convergence": convergence_statuses,

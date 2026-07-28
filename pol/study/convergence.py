@@ -48,6 +48,7 @@ def check_convergence(
     states: list[torch.Tensor] = []
     features: list[torch.Tensor] = []
     predictions: list[torch.Tensor] = []
+    prediction_semantics: str | None = None
     valid_n_sur: list[int] = []
     for n_sur in spec.n_sur_candidates:
         refined = apply_trial_overrides(trial, {"feature.n_sur": int(n_sur)})
@@ -58,12 +59,22 @@ def check_convergence(
             domain_length=dataset.domain_length,
             l2_scale=refined.feature.observation.l2_scale,
         )
-        coefficients, _ = predict_frozen(
+        frozen_predictions = predict_frozen(
             model,
             phi,
             q=int(refined.output.q),
             domain_length=dataset.domain_length,
         )
+        if frozen_predictions.single_model_prediction is not None:
+            coefficients = frozen_predictions.single_model_prediction
+            active_semantics = "single_model"
+        else:
+            coefficients = frozen_predictions.prediction_ensemble()
+            active_semantics = "prediction_ensemble"
+        if prediction_semantics is None:
+            prediction_semantics = active_semantics
+        elif prediction_semantics != active_semantics:
+            raise ValueError("prediction semantics changed across convergence resolutions")
         field = real_fourier_synthesis(
             coefficients,
             int(refined.input.n_tar),
@@ -105,6 +116,7 @@ def check_convergence(
                 "feature_relative_l2_max": feature["max"],
                 "prediction_relative_l2_mean": prediction["relative_l2_mean"],
                 "prediction_relative_l2_max": prediction["relative_l2_max"],
+                "prediction_semantics": prediction_semantics,
                 "status": "pass" if passed else "fail",
             }
         )

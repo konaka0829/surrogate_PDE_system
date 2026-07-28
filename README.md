@@ -27,6 +27,9 @@ trial and study execution path.
   JSON path.
 - Hyperparameter and system selection use the training and validation splits
   only.
+- Random-feature evaluation seeds are independent model realizations. Primary
+  test results summarize per-seed metrics; prediction averaging is reported
+  separately as an ensemble model.
 - The selection record and frozen evaluation plan are written, hashed, and read
   back before the first test state solve or test metric.
 - Validation products, datasets, feature states, and completed studies are
@@ -230,6 +233,8 @@ Important files include:
 - `frozen_models.pt`
 - `frozen_evaluation_plan.json`
 - `test_metrics.csv`
+- `random_feature_seed_metrics.csv`
+- `random_feature_ensemble_metrics.csv`
 - diagnostic CSV files
 - `events.json`
 - `run_summary.json`
@@ -239,6 +244,38 @@ Important files include:
 `events.json` records the durability boundary. In a valid run,
 `freeze_read_back` appears before `first_test_state_solve` and
 `first_test_metric`.
+
+`test_metrics.csv` is the primary comparison table. Deterministic readouts have
+`test_result_kind=single_model`. For `random_feature_ridge`, every canonical
+`test_*` metric is the arithmetic mean of metrics computed independently for
+each frozen evaluation seed, and the row has
+`test_result_kind=independent_seed_metric_summary`. Each canonical metric is
+accompanied by:
+
+```text
+<metric>_seed_mean
+<metric>_seed_std
+<metric>_seed_ci95_low
+<metric>_seed_ci95_high
+```
+
+The standard deviation uses Bessel's correction (`ddof=1`), and the two-sided
+95% interval for the arithmetic mean uses a Student-t quantile. Seed count,
+confidence level, and interval method are recorded in the primary row.
+
+`random_feature_seed_metrics.csv` contains one
+`independent_seed_realization` row per frozen evaluation seed.
+`random_feature_ensemble_metrics.csv` contains one separately labeled
+`prediction_ensemble` row per selected random-feature model; its metric names
+begin with `test_ensemble_`. Ensemble metrics are not copied into the canonical
+primary metric columns. `run_summary.json` records primary, per-seed, and
+ensemble row counts.
+
+The study-run identity, manifest, summary, frozen model archive, selection
+record, and frozen evaluation plan use the P0-01 `v2` contract. Earlier `v1`
+study runs are rejected rather than interpreted with the new primary-result
+semantics. The package version and numerical environment fingerprint also
+separate new runs from earlier cached identities.
 
 ## Included profiles
 

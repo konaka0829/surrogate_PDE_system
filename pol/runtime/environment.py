@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 import numpy as np
+import scipy
 import torch
 
 from pol import __version__
@@ -23,6 +24,7 @@ def numerical_environment_fingerprint() -> dict[str, Any]:
         "torch_version": str(torch.__version__),
         "torch_cuda_version": None if torch.version.cuda is None else str(torch.version.cuda),
         "numpy_version": str(np.__version__),
+        "scipy_version": str(scipy.__version__),
     }
 
 

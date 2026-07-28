@@ -334,6 +334,12 @@ class RandomFeatureRidgeReadoutSpec(StrictModel):
             raise ValueError("all random-feature candidate sequences must be nonempty")
         if any(value < 0 for value in (*self.weight_scales, *self.bias_scales, *self.zetas)):
             raise ValueError("random-feature scales and zetas must be nonnegative")
+        if len(set(self.selection_seeds)) != len(self.selection_seeds):
+            raise ValueError("selection_seeds must be unique")
+        if len(self.evaluation_seeds) < 2:
+            raise ValueError("evaluation_seeds must contain at least two seeds")
+        if len(set(self.evaluation_seeds)) != len(self.evaluation_seeds):
+            raise ValueError("evaluation_seeds must be unique")
         if set(self.selection_seeds) & set(self.evaluation_seeds):
             raise ValueError("selection and evaluation seeds must be disjoint")
         return self

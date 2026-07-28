@@ -1,4 +1,4 @@
-# Known scientific risks at Phase P0-00
+# Known scientific risks at Phase P0-01
 
 Status terms in this document have strict meanings:
 
@@ -7,32 +7,41 @@ Status terms in this document have strict meanings:
   has not been demonstrated;
 - **not yet verified**: the required historical result or runtime evidence is
   absent.
+- **resolved**: the earlier behavior is retained for history, but the current
+  implementation and focused tests enforce the stated correction.
 
-This phase records these risks and does not fix them.
+Resolved items remain recorded with their resolution and residual caveats.
 
-## R1. Model 3 primary test metrics use a prediction ensemble
+## R1. Model 3 primary test metrics used a prediction ensemble
 
-**Status: confirmed.**
+**Status: resolved in P0-01.**
 
-Relevant code:
+Resolution:
 
 - `pol/study/trial.py::predict_frozen`
 - `pol/study/trial.py::TrialEngine.evaluate_test`
-- `pol/study/runner.py::run_study`
+- `pol/study/runner.py::run_study` and `verify_study_run`
 
-For a `random_feature_ridge` frozen model, `predict_frozen` evaluates every
-seed member and returns the arithmetic mean of their predictions as
-`aggregate`. `TrialEngine.evaluate_test` computes its main metric row from that
-averaged prediction. `run_study` writes the row to `test_metrics.csv`.
+The frozen prediction API now distinguishes a deterministic prediction from
+per-seed predictions and requires an explicit call to form a prediction
+ensemble. For `random_feature_ridge`, `TrialEngine.evaluate_test` computes
+metrics independently for every frozen evaluation seed. `test_metrics.csv`
+stores their arithmetic mean, Bessel-corrected sample standard deviation, and
+two-sided 95% Student-t interval as the primary result.
 
-Per-seed metrics are also computed and written to
-`random_feature_seed_metrics.csv`, but the primary table does not compute the
-mean, standard deviation, or confidence interval of those per-seed metrics.
+Per-seed realizations remain in `random_feature_seed_metrics.csv`. The metric
+of the seed-prediction average is now labeled `prediction_ensemble`, uses
+`test_ensemble_*` metric names, and is stored only in
+`random_feature_ensemble_metrics.csv`. Completed-run verification recomputes
+the primary seed summaries and checks frozen seed membership and ensemble row
+cardinality.
 
-**Potential impact:** a prediction ensemble is a different model and can have
-different bias and variance from an independently seeded Model 3 realization.
-The current primary row can therefore overstate or otherwise change the
-performance attributed to Model 3 as a random model realization.
+**Residual caveat:** a finite seed count estimates variability only over the
+configured random-feature initialization distribution. Student-t intervals
+describe uncertainty in the arithmetic mean under the usual independent-seed
+assumption; they do not quantify dataset-sampling uncertainty. Ensemble rows
+remain scientifically different models and must not be substituted for the
+primary rows.
 
 ## R2. GRF frequencies do not use `domain_length`
 

@@ -1,6 +1,6 @@
 # Current implementation inventory
 
-This inventory describes the code present at Phase P0-00. It is a
+This inventory describes the code present at Phase P0-01. It is a
 characterization of the current implementation, not a claim that every
 implemented behavior is scientifically final.
 
@@ -73,7 +73,7 @@ The unified trial engine implements:
   regularization and an SVD minimum-norm path at zero regularization (Model 2);
 - `random_feature_ridge`: skip-connected random nonlinear features followed
   by centered affine ridge regression, with separate selection and evaluation
-  seed sets (Model 3).
+  seed sets (Model 3). Evaluation requires at least two distinct seeds.
 
 Display names do not control dispatch.
 
@@ -117,6 +117,13 @@ Convergence rows separately report terminal-state, observed-feature, and
 prediction relative errors (mean and maximum). Heat-multiplier and
 noise-robustness diagnostics have their own long-form tables.
 
+For a selected random-feature readout, the primary canonical test metrics are
+means of per-seed metrics. The same row records Bessel-corrected sample
+standard deviations and two-sided 95% Student-t confidence intervals.
+Per-seed rows and prediction-ensemble rows are separate tables, and ensemble
+metrics use `test_ensemble_*` names. Deterministic readouts remain single-model
+results and do not receive placeholder seed uncertainty.
+
 ## Implemented artifact and evaluation controls
 
 - Strict Pydantic models reject unknown scientific configuration keys.
@@ -130,10 +137,16 @@ noise-robustness diagnostics have their own long-form tables.
   written, hashed, and read back before test feature-state access.
 - Event ordering and test-table bindings are checked when a completed study is
   verified.
+- Completed-run verification checks frozen random-feature seed membership,
+  recomputes primary mean/standard-deviation/confidence-interval fields from
+  per-seed rows, and checks the separate ensemble row and member count.
+- P0-01 study-run identity, manifest, summary, selection, frozen-plan, and
+  frozen-model schemas are versioned separately from P0-00 outputs; legacy
+  run manifests are rejected explicitly.
 - Plot-only regeneration requires an existing verified run and is
   transactional.
 
-## P0-00 characterization baseline
+## P0-00 characterization baseline and P0-01 extension
 
 The following small deterministic tests fix the behaviors requested for this
 phase. No solver or metric implementation was changed to establish them.
@@ -146,14 +159,13 @@ phase. No solver or metric implementation was changed to establish them.
 | Model 1 consistency for matched target/surrogate dynamics | `tests/test_learning.py::test_model1_is_consistent_for_matched_bandlimited_heat_dynamics` |
 | split ID separation and full coverage | `tests/test_validation_data.py::test_reference_dataset_reuses_validation_and_has_disjoint_splits` and dataset load-time validation |
 | no test access before persisted freeze-plan read-back | `tests/test_study.py::test_study_freezes_selection_before_any_test_evaluation`, completed-run semantic verification, and event-order checks |
+| independent-seed primary statistics and separate prediction ensemble | `tests/test_random_feature_evaluation.py` and the random-feature artifact/verification tests in `tests/test_study.py` |
 
-## Missing or incomplete at P0-00
+## Missing or incomplete after P0-01
 
 The following are not implemented or are incomplete; they are not repaired in
 this phase:
 
-- primary Model 3 reporting does not yet aggregate independent per-seed
-  metrics with standard deviation and a confidence interval;
 - GRF spatial frequencies are not parameterized by `domain_length`;
 - the validation certificate's selected solver/reference conditions are not
   strongly checked against each dataset's target solver and `reference_nx`;

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pol-pde-surrogate"
-version = "0.2.0"
+version = "0.2.1"
 description = "Validated surrogate-dynamics feature maps for PDE operator learning"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,6 +12,7 @@ license = {file = "LICENSE"}
 dependencies = [
     "torch>=2.0",
     "numpy>=1.23",
+    "scipy>=1.10",
     "matplotlib>=3.7",
     "pydantic>=2.7",
 ]

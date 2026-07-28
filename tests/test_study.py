@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
 
 from pol.config.loader import load_dataset_spec, load_study_spec
 from pol.data.dataset import ensure_dataset
@@ -18,6 +19,20 @@ from tests.helpers import write_json, write_tiny_stack
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def _refresh_manifest_record(run_path: Path, relative_path: str) -> None:
+    manifest_path = run_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for index, record in enumerate(manifest["files"]):
+        if record["relative_path"] == relative_path:
+            manifest["files"][index] = manifest_records(
+                run_path, [relative_path]
+            )[0]
+            break
+    else:
+        raise AssertionError(f"manifest has no record for {relative_path}")
+    write_strict_json(manifest_path, manifest)
 
 
 def test_plan_is_pure_and_scalar_is_a_one_cell_study(tmp_path: Path) -> None:
@@ -61,6 +76,65 @@ def test_study_freezes_selection_before_any_test_evaluation(tmp_path: Path) -> N
     assert len(validation_rows) == 3
     assert len(test_rows) == 3
     assert sum(row["selected"] == "True" for row in validation_rows) == 3
+
+
+def test_random_feature_test_tables_bind_seed_summary_and_ensemble(
+    tmp_path: Path,
+) -> None:
+    _, _, study_path = write_tiny_stack(tmp_path)
+    spec = load_study_spec(study_path, repo_root=tmp_path)
+    result = run_study(spec, repo_root=tmp_path)
+
+    primary_rows = _read_csv(result.path / "test_metrics.csv")
+    seed_rows = _read_csv(result.path / "random_feature_seed_metrics.csv")
+    ensemble_rows = _read_csv(
+        result.path / "random_feature_ensemble_metrics.csv"
+    )
+    primary = next(row for row in primary_rows if row["readout_id"] == "random")
+    assert primary["test_result_kind"] == "independent_seed_metric_summary"
+    assert primary["test_seed_count"] == "2"
+    assert primary["test_seed_std_ddof"] == "1"
+    assert primary["test_confidence_level"] == "0.95"
+    assert primary["test_confidence_interval_method"] == "student_t"
+    assert float(primary["test_field_relative_l2_mean"]) == pytest.approx(
+        float(primary["test_field_relative_l2_mean_seed_mean"])
+    )
+    deterministic_rows = [
+        row for row in primary_rows if row["readout_id"] != "random"
+    ]
+    assert all(row["test_result_kind"] == "single_model" for row in deterministic_rows)
+    assert all(row["test_seed_count"] == "" for row in deterministic_rows)
+    assert all(
+        row["test_field_relative_l2_mean_seed_std"] == ""
+        for row in deterministic_rows
+    )
+
+    archive = torch.load(
+        result.path / "frozen_models.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    random_entry = next(
+        entry
+        for entry in archive["models"].values()
+        if entry["readout_id"] == "random"
+    )
+    frozen_seeds = {int(member["seed"]) for member in random_entry["model"]["members"]}
+    assert {int(row["seed"]) for row in seed_rows} == frozen_seeds
+    assert all(
+        row["test_result_kind"] == "independent_seed_realization"
+        for row in seed_rows
+    )
+    assert all(row["selection_record_hash"] for row in seed_rows)
+    assert all(row["frozen_plan_hash"] for row in seed_rows)
+
+    assert len(ensemble_rows) == 1
+    assert ensemble_rows[0]["test_result_kind"] == "prediction_ensemble"
+    assert ensemble_rows[0]["ensemble_member_count"] == "2"
+    assert "test_ensemble_field_relative_l2_mean" in ensemble_rows[0]
+    assert result.summary["primary_test_row_count"] == 3
+    assert result.summary["random_feature_seed_row_count"] == 2
+    assert result.summary["random_feature_ensemble_row_count"] == 1
 
 
 
@@ -189,6 +263,64 @@ def test_study_verification_checks_test_table_bindings(tmp_path: Path) -> None:
     write_strict_json(manifest_path, manifest)
 
     with pytest.raises(ValueError, match="not marked as selected"):
+        verify_study_run(result.path)
+
+
+@pytest.mark.parametrize(
+    ("tamper_kind", "error"),
+    [
+        ("seed", "primary metric test_coefficient_mse"),
+        ("summary", "primary metric test_coefficient_mse"),
+        ("ensemble", "ensemble member count"),
+    ],
+)
+def test_study_verifier_rejects_random_feature_statistical_tampering(
+    tmp_path: Path,
+    tamper_kind: str,
+    error: str,
+) -> None:
+    _, _, study_path = write_tiny_stack(tmp_path)
+    spec = load_study_spec(study_path, repo_root=tmp_path)
+    result = run_study(spec, repo_root=tmp_path)
+
+    if tamper_kind == "seed":
+        relative_path = "random_feature_seed_metrics.csv"
+        rows = _read_csv(result.path / relative_path)
+        rows[0]["test_coefficient_mse"] = str(
+            float(rows[0]["test_coefficient_mse"]) + 1.0
+        )
+    elif tamper_kind == "summary":
+        relative_path = "test_metrics.csv"
+        rows = _read_csv(result.path / relative_path)
+        random_row = next(row for row in rows if row["readout_id"] == "random")
+        random_row["test_coefficient_mse"] = str(
+            float(random_row["test_coefficient_mse"]) + 1.0
+        )
+    else:
+        relative_path = "random_feature_ensemble_metrics.csv"
+        rows = _read_csv(result.path / relative_path)
+        rows[0]["ensemble_member_count"] = "3"
+    write_csv(
+        result.path / relative_path,
+        rows,
+        fieldnames=rows[0].keys(),
+    )
+    _refresh_manifest_record(result.path, relative_path)
+
+    with pytest.raises(ValueError, match=error):
+        verify_study_run(result.path)
+
+
+def test_legacy_study_run_manifest_is_rejected_explicitly(tmp_path: Path) -> None:
+    _, _, study_path = write_tiny_stack(tmp_path)
+    spec = load_study_spec(study_path, repo_root=tmp_path)
+    result = run_study(spec, repo_root=tmp_path)
+    manifest_path = result.path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "pol-study-run-manifest-v1"
+    write_strict_json(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="unsupported study-run manifest"):
         verify_study_run(result.path)
 
 

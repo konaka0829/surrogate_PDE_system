@@ -152,7 +152,7 @@ def write_tiny_stack(
                         "weight_scales": [0.5],
                         "bias_scales": [0.1],
                         "selection_seeds": [11],
-                        "evaluation_seeds": [21],
+                        "evaluation_seeds": [21, 22],
                         "zetas": [1e-8],
                         "tie_tolerance": 1e-12,
                         "svd_rcond": None,

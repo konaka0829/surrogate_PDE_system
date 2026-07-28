@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from pol.config.loader import load_study_spec
-from pol.config.models import InterfaceDimensionsSpec, TrialSpec
+from pol.config.models import (
+    InterfaceDimensionsSpec,
+    RandomFeatureRidgeReadoutSpec,
+    TrialSpec,
+)
 from tests.helpers import write_tiny_stack
 
 
@@ -93,4 +97,43 @@ def test_static_feature_generator_has_no_hidden_evolution() -> None:
                     {"id": "affine", "kind": "affine_ridge", "zetas": [0.0]}
                 ],
             }
+        )
+
+
+def _random_feature_readout(**overrides):
+    values = {
+        "id": "random",
+        "kind": "random_feature_ridge",
+        "widths": [4],
+        "weight_scales": [0.5],
+        "bias_scales": [0.1],
+        "selection_seeds": [11],
+        "evaluation_seeds": [21, 22],
+        "zetas": [1e-8],
+    }
+    values.update(overrides)
+    return values
+
+
+def test_random_feature_readout_rejects_one_evaluation_seed() -> None:
+    with pytest.raises(ValueError, match="at least two"):
+        RandomFeatureRidgeReadoutSpec.model_validate(
+            _random_feature_readout(evaluation_seeds=[21])
+        )
+
+
+def test_random_feature_readout_rejects_duplicate_seeds() -> None:
+    with pytest.raises(ValueError, match="evaluation_seeds must be unique"):
+        RandomFeatureRidgeReadoutSpec.model_validate(
+            _random_feature_readout(evaluation_seeds=[21, 21])
+        )
+
+
+def test_random_feature_readout_rejects_selection_evaluation_overlap() -> None:
+    with pytest.raises(ValueError, match="must be disjoint"):
+        RandomFeatureRidgeReadoutSpec.model_validate(
+            _random_feature_readout(
+                selection_seeds=[11, 12],
+                evaluation_seeds=[12, 21],
+            )
         )
