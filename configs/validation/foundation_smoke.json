@@ -1,5 +1,5 @@
 {
-  "schema_version": "pol-validation-v3",
+  "schema_version": "pol-validation-v5",
   "name": "periodic_burgers_foundation_smoke",
   "artifact_root": "artifacts",
   "profile": "smoke",
@@ -23,45 +23,100 @@
     },
     "preprocessing": "l2_scaling_only"
   },
-  "reference_evolution": {
-    "system": {
-      "kind": "burgers",
-      "nu": 0.01,
-      "advection_coefficient": 1.0,
-      "solver": "split_step",
-      "dt": 0.01,
-      "fine_dt": 0.0025,
-      "dealias": true
+  "target_reference": {
+    "kind": "burgers_convergence",
+    "reference_evolution": {
+      "system": {
+        "kind": "burgers",
+        "nu": 0.01,
+        "advection_coefficient": 1.0,
+        "solver": "split_step",
+        "dt": 0.01,
+        "fine_dt": 0.0025,
+        "dealias": true
+      },
+      "time": 0.02
     },
-    "time": 0.02
-  },
-  "calibration_sample_ids": [
-    0,
-    1
-  ],
-  "reference_nx_candidates": [
-    32,
-    64
-  ],
-  "time_candidates": [
-    {
-      "solver": "split_step",
-      "dt": 0.01,
-      "fine_dt": 0.005,
-      "dealias": true
+    "calibration_sample_ids": [
+      0,
+      1
+    ],
+    "reference_nx_candidates": [
+      32,
+      64
+    ],
+    "time_candidates": [
+      {
+        "solver": "split_step",
+        "dt": 0.01,
+        "fine_dt": 0.005,
+        "dealias": true
+      },
+      {
+        "solver": "split_step",
+        "dt": 0.01,
+        "fine_dt": 0.0025,
+        "dealias": true
+      }
+    ],
+    "q_reference_check": 17,
+    "reference_tolerances": {
+      "mean_relative_l2": 0.05,
+      "max_relative_l2": 0.1,
+      "low_mode_relative_l2": 0.05
     },
-    {
-      "solver": "split_step",
-      "dt": 0.01,
-      "fine_dt": 0.0025,
-      "dealias": true
+    "cross_solver_validation": {
+      "schema_version": "pol-burgers-cross-solver-spec-v1",
+      "enabled": true,
+      "context": {
+        "system_kind": "burgers",
+        "nu": 0.01,
+        "advection_coefficient": 1.0,
+        "final_time": 0.02,
+        "domain_length": 1.0,
+        "dtype": "float64",
+        "dealias": true
+      },
+      "solvers": {
+        "split_step": {
+          "candidates": [
+            {
+              "solver": "semi_implicit",
+              "dt": 0.01,
+              "fine_dt": 0.005,
+              "dealias": true
+            },
+            {
+              "solver": "split_step",
+              "dt": 0.01,
+              "fine_dt": 0.0025,
+              "dealias": true
+            }
+          ]
+        },
+        "etdrk4": {
+          "candidates": [
+            {
+              "solver": "fourier_pseudospectral_etdrk4",
+              "dt": 0.01,
+              "fine_dt": null,
+              "dealias": true
+            },
+            {
+              "solver": "etdrk4",
+              "dt": 0.005,
+              "fine_dt": null,
+              "dealias": true
+            }
+          ]
+        }
+      },
+      "tolerances": {
+        "mean_relative_l2": 0.0001,
+        "max_relative_l2": 0.00015,
+        "low_mode_relative_l2": 0.00002
+      }
     }
-  ],
-  "q_reference_check": 17,
-  "reference_tolerances": {
-    "mean_relative_l2": 0.05,
-    "max_relative_l2": 0.1,
-    "low_mode_relative_l2": 0.05
   },
   "algebraic_tolerances": {
     "float64_atol": 1e-10,

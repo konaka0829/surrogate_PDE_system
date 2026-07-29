@@ -24,6 +24,22 @@ operator-learning selection and evaluation. Dataset construction does not
 import a numbered validation experiment, and the prediction path does not
 contain validation-specific branches.
 
+Validation keeps one runner and one CLI path. `ValidationSpec.target_reference`
+is a strict semantic union: common foundation and calibration isolation are
+run once, while `burgers_convergence`, `heat_analytic`, and
+`reaction_diffusion_convergence` own only their PDE-specific reference checks.
+`pol.validation.model1_consistency` owns the separate profile-independent
+finite-input-to-fixed-decoder pipeline suite and has no filesystem or study
+dependency. `pol.validation.quadrature` similarly owns the pure analytic
+periodic-`L2` and reference-grid quadrature suite. It holds the continuous
+prediction, target, and finite `n_tar` data fixed while varying only `n_ref`;
+the validation runner serializes its result but does not reimplement its
+selection rule. `pol.validation.conditions` canonicalizes system solver
+conditions and validates the system-agnostic target-reference contract.
+`pol.validation.binding` consumes that contract before dataset target
+evolution; it does not infer a safe condition from solver aliases, larger
+unlisted grids, or smaller unlisted time steps.
+
 ## 2. Ownership of dimensions
 
 | Symbol | Owner | Meaning |
@@ -72,7 +88,69 @@ whether this target-reference condition is validated or merely uses a checked
 foundation. Consequently, a resolution sweep does not redefine the metric
 merely by changing its finite target grid.
 
-## 4. Unified execution
+## 4. Split ownership and calibration isolation
+
+`pol.data.splits` owns the deterministic train/validation/test partition. It
+uses a CPU `torch.Generator` and the established `torch.randperm` order, checks
+pairwise disjoint full coverage, and constructs the canonical split payload
+and hash. Dataset construction and validation calibration both call this
+primitive; neither carries a private permutation algorithm.
+
+Validation calibration IDs remain explicit configuration. Before generating
+initial conditions or running a PDE, validation classifies them against the
+shared split and rejects any test member. The calibration membership, zero
+overlap, split policy/version, counts, seed, and split hash are bound into the
+validation identity/foundation certificate and copied into the dataset binding
+proof. Certificate, proof, and dataset loading independently reconstruct and
+verify these values.
+
+## 5. Unified execution
+
+The study execution path has a one-way internal dependency graph:
+
+```text
+config + learning + data
+          ↓
+study.evaluation ← study.readouts
+          ↓             ↓
+             study.trial
+                  ↓
+              study.search
+
+study.cases ───────────────┐
+study.trial + study.search ├─> study.runner
+study.protocol ────────────┤
+study.results ─────────────┤
+study.verification ────────┘
+```
+
+`pol.study.evaluation` owns metric wrappers, representation-floor evaluation,
+independent-seed statistics, immutable evaluation results, and pure row
+construction. `pol.study.readouts` owns validation-time readout fitting,
+readout-local hyperparameter selection, frozen payload construction, and
+frozen prediction. Neither module owns dataset splits, feature-state solves,
+filesystem transactions, or test-access timing.
+
+`pol.study.trial.TrialEngine` coordinates one validated trial: it obtains the
+finite `n_tar` view, requests cached `n_sur` feature states, observes `J`
+features, separates train and validation tensors, delegates readout work, and
+requests test features only through its test-evaluation entry point.
+
+`pol.study.cases` owns filesystem-free scalar/sweep expansion and planning.
+`pol.study.protocol` owns selection records, frozen archives and plans, their
+cross-hashes, and the persisted read-back boundary that authorizes test
+evaluation. `pol.study.results` owns stable table fields, result/summary
+serialization, manifest construction, and reporter inputs.
+`pol.study.verification` is the read-only completed-run verifier: it checks
+exact bytes, cross-artifact bindings, seed summaries, decoder diagnostics, and
+event ordering. These modules do not import `pol.study.runner`.
+
+`pol.study.runner` is the public orchestration façade. It prepares the dataset,
+expands cases, invokes trial/search and convergence work, completes the
+selection/freeze/read-back protocol, then starts test evaluation and
+transactionally publishes results. The sequencing remains visible in one
+execution path; planning, verification, and plots-only reuse do not create
+alternate experiment runners.
 
 `StudyRunner` expands:
 
@@ -95,7 +173,7 @@ It hashes and reads the latter two files back. Only then does it request test
 feature states or compute test metrics. `events.json` makes this ordering
 auditable.
 
-## 5. Content addressing
+## 6. Content addressing
 
 Scientific identity dictionaries exclude storage locations. SHA-256 hashes of
 canonical JSON determine artifact and study identities. Artifacts contain a
@@ -105,7 +183,7 @@ Publication uses a sibling staging directory. The staging tree is validated
 before an atomic directory replacement. If publication fails, a previously
 valid destination is restored.
 
-## 6. Extension points
+## 7. Extension points
 
 ### New evolution system
 
@@ -119,8 +197,8 @@ The study runner requires no system-name branch.
 ### New readout
 
 1. Add a discriminated readout spec.
-2. Implement fitting and frozen prediction in `pol/study/trial.py` or a focused
-   module if the implementation is large.
+2. Implement fitting, serialization, and frozen prediction in
+   `pol/study/readouts.py`.
 3. Define serializable frozen parameters.
 4. Add selection and read-back tests.
 

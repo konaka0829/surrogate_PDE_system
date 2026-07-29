@@ -1,11 +1,10 @@
 {
-  "schema_version": "pol-dataset-v2",
+  "schema_version": "pol-dataset-v3",
   "name": "heat_reference_smoke",
   "artifact_root": "artifacts",
-  "validation_spec": "configs/validation/foundation_smoke.json",
+  "validation_spec": "configs/validation/heat_smoke.json",
   "binding": {
-    "kind": "foundation_only",
-    "reason": "Reuse the passing initial-condition foundation only; Burgers reference convergence does not validate the heat target."
+    "kind": "validated_reference"
   },
   "reference_nx": 64,
   "target": {

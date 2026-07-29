@@ -10,6 +10,7 @@ import torch
 from pol.artifacts import ArtifactRef, ArtifactStore, verify_artifact
 from pol.config.loader import load_validation_spec
 from pol.config.models import DatasetSpec
+from pol.data.splits import build_data_split, split_contract
 from pol.math.periodic import spectral_resample_periodic
 from pol.runtime.environment import numerical_environment_fingerprint
 from pol.runtime.device import (
@@ -90,7 +91,7 @@ def _scientific_identity(
     payload.pop("artifact_root", None)
     payload.pop("validation_spec", None)
     return {
-        "schema_version": "pol-reference-dataset-identity-v4",
+        "schema_version": "pol-reference-dataset-identity-v5",
         **execution_device_policy(),
         "environment": numerical_environment_fingerprint(),
         "validation_artifact_id": validation_artifact_id,
@@ -103,15 +104,6 @@ def _scientific_identity(
         "binding_proof": binding_proof,
         "spec": payload,
     }
-
-
-def _split_ids(total: int, n_train: int, n_validation: int, seed: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    generator = torch.Generator(device="cpu").manual_seed(int(seed))
-    permutation = torch.randperm(total, generator=generator, dtype=torch.long)
-    train = permutation[:n_train].clone()
-    validation = permutation[n_train : n_train + n_validation].clone()
-    test = permutation[n_train + n_validation :].clone()
-    return train, validation, test
 
 
 def _load_master(path: Path) -> dict[str, Any]:
@@ -244,19 +236,24 @@ def _build_dataset(
         name="targets_reference",
     )
     samples = validation_spec.samples
-    train_ids, validation_ids, test_ids = _split_ids(
-        samples.total_samples,
-        samples.n_train,
-        samples.n_validation,
-        samples.seed,
+    split = build_data_split(
+        total_samples=int(samples.total_samples),
+        n_train=int(samples.n_train),
+        n_validation=int(samples.n_validation),
+        n_test=int(samples.n_test),
+        seed=int(samples.seed),
     )
-    split_payload = {
-        "sample_ids": master_ids.tolist(),
-        "train_ids": train_ids.tolist(),
-        "validation_ids": validation_ids.tolist(),
-        "test_ids": test_ids.tolist(),
-    }
-    split_hash = stable_object_hash(split_payload)
+    train_ids = split.train_ids
+    validation_ids = split.validation_ids
+    test_ids = split.test_ids
+    split_hash = split.split_hash(master_ids)
+    proof_split = binding_proof.get("dataset_condition", {}).get("split")
+    if stable_object_hash(proof_split) != stable_object_hash(
+        split_contract(split, sample_ids=master_ids)
+    ):
+        raise RuntimeError(
+            "dataset split does not match validation binding provenance"
+        )
     identity = _scientific_identity(
         spec, validation_ref.artifact_id, binding_proof
     )
@@ -271,7 +268,7 @@ def _build_dataset(
     }
     policy_fields = execution_device_policy()
     metadata_payload = {
-        "schema_version": "pol-reference-dataset-metadata-v4",
+        "schema_version": "pol-reference-dataset-metadata-v5",
         **policy_fields,
         "artifact_id": ref.artifact_id,
         "name": spec.name,
@@ -294,7 +291,7 @@ def _build_dataset(
         },
     }
     archive = {
-        "schema_version": "pol-reference-dataset-v4",
+        "schema_version": "pol-reference-dataset-v5",
         **policy_fields,
         "artifact_id": ref.artifact_id,
         **binding_fields,
@@ -321,7 +318,7 @@ def _build_dataset(
         write_strict_json(
             root / "resolved_spec.json",
             {
-                "schema_version": "pol-dataset-resolved-spec-v4",
+                "schema_version": "pol-dataset-resolved-spec-v5",
                 **policy_fields,
                 "validation_artifact_id": validation_ref.artifact_id,
                 **binding_fields,
@@ -347,10 +344,11 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
         raise ValueError("artifact is not a dataset")
     identity = manifest.get("identity")
     if not isinstance(identity, dict) or identity.get("schema_version") != (
-        "pol-reference-dataset-identity-v4"
+        "pol-reference-dataset-identity-v5"
     ):
         raise ValueError(
-            "unsupported legacy dataset identity; P0-04 CPU-only binding is required"
+            "unsupported legacy dataset identity; Phase 2-02 target-reference "
+            "binding is required"
         )
     verify_execution_device_policy(
         identity,
@@ -366,9 +364,9 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
     payload = torch.load(root / "dataset.pt", map_location="cpu", weights_only=True)
     if not isinstance(payload, dict):
         raise ValueError("dataset archive payload must be an object")
-    if payload.get("schema_version") != "pol-reference-dataset-v4":
+    if payload.get("schema_version") != "pol-reference-dataset-v5":
         raise ValueError(
-            "unsupported dataset archive schema; P0-04 requires v4"
+            "unsupported dataset archive schema; Phase 2-02 requires v5"
         )
     verify_execution_device_policy(
         payload,
@@ -384,9 +382,9 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
     metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
     if not isinstance(metadata, dict):
         raise ValueError("dataset metadata payload must be an object")
-    if metadata.get("schema_version") != "pol-reference-dataset-metadata-v4":
+    if metadata.get("schema_version") != "pol-reference-dataset-metadata-v5":
         raise ValueError(
-            "unsupported dataset metadata schema; P0-04 requires v4"
+            "unsupported dataset metadata schema; Phase 2-02 requires v5"
         )
     verify_execution_device_policy(
         metadata,
@@ -399,9 +397,9 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
     )
     if not isinstance(resolved, dict):
         raise ValueError("dataset resolved-spec payload must be an object")
-    if resolved.get("schema_version") != "pol-dataset-resolved-spec-v4":
+    if resolved.get("schema_version") != "pol-dataset-resolved-spec-v5":
         raise ValueError(
-            "unsupported dataset resolved-spec schema; P0-04 requires v4"
+            "unsupported dataset resolved-spec schema; Phase 2-02 requires v5"
         )
     verify_execution_device_policy(
         resolved,
@@ -493,14 +491,44 @@ def load_dataset(path: Path | str) -> ReferenceDataset:
         raise ValueError("dataset splits are not a disjoint full cover")
     if set(assigned.tolist()) != set(sample_ids.tolist()):
         raise ValueError("dataset splits do not cover sample_ids exactly")
-    split_payload = {
-        "sample_ids": sample_ids.tolist(),
-        "train_ids": payload["train_ids"].tolist(),
-        "validation_ids": payload["validation_ids"].tolist(),
-        "test_ids": payload["test_ids"].tolist(),
-    }
-    split_hash = stable_object_hash(split_payload)
-    if split_hash != payload.get("split_hash") or split_hash != metadata.get("split_hash"):
+    proof_split = proof_dataset_condition.get("split")
+    if not isinstance(proof_split, dict):
+        raise ValueError("dataset binding proof has no split condition")
+    try:
+        expected_split = build_data_split(
+            total_samples=proof_split["total_samples"],
+            n_train=proof_split["n_train"],
+            n_validation=proof_split["n_validation"],
+            n_test=proof_split["n_test"],
+            seed=proof_split["seed"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("dataset binding proof split condition is invalid") from exc
+    if (
+        not torch.equal(payload["train_ids"], expected_split.train_ids)
+        or not torch.equal(
+            payload["validation_ids"],
+            expected_split.validation_ids,
+        )
+        or not torch.equal(payload["test_ids"], expected_split.test_ids)
+    ):
+        raise ValueError(
+            "dataset split IDs do not match deterministic split provenance"
+        )
+    expected_split_contract = split_contract(
+        expected_split,
+        sample_ids=sample_ids,
+    )
+    if stable_object_hash(proof_split) != stable_object_hash(
+        expected_split_contract
+    ):
+        raise ValueError("dataset binding proof split condition mismatch")
+    split_hash = expected_split.split_hash(sample_ids)
+    if (
+        split_hash != payload.get("split_hash")
+        or split_hash != metadata.get("split_hash")
+        or split_hash != proof_split.get("split_hash")
+    ):
         raise ValueError("dataset split hash mismatch")
     validation_artifact_id = payload.get("validation_artifact_id")
     if any(

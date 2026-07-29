@@ -5,13 +5,25 @@ import json
 import math
 from typing import Any, Mapping
 
+import torch
+
 from pol.config.models import DatasetSpec, ValidationSpec
+from pol.data.splits import (
+    build_data_split,
+    calibration_split_provenance,
+    split_contract,
+)
 from pol.numerics.initial_conditions import GRF_SAMPLER_SEMANTICS
 from pol.runtime.device import (
     execution_device_policy,
     verify_execution_device_policy,
 )
 from pol.runtime.hashing import stable_object_hash
+from .conditions import (
+    canonical_invariant_parameters,
+    canonical_numerical_condition,
+    validate_target_reference_contract,
+)
 
 
 class DatasetBindingError(ValueError):
@@ -82,6 +94,26 @@ def _exact_check(
     )
 
 
+def _split_provenance(
+    validation_spec: ValidationSpec,
+) -> tuple[dict[str, object], dict[str, int | str]]:
+    samples = validation_spec.samples
+    split = build_data_split(
+        total_samples=int(samples.total_samples),
+        n_train=int(samples.n_train),
+        n_validation=int(samples.n_validation),
+        n_test=int(samples.n_test),
+        seed=int(samples.seed),
+    )
+    sample_ids = torch.arange(split.total_samples, dtype=torch.long)
+    calibration = calibration_split_provenance(
+        split,
+        validation_spec.target_reference.calibration_sample_ids,
+        sample_ids=sample_ids,
+    )
+    return calibration, split_contract(split, sample_ids=sample_ids)
+
+
 def _foundation_checks(
     certificate: Mapping[str, Any],
     validation_spec: ValidationSpec,
@@ -95,12 +127,37 @@ def _foundation_checks(
             requested=certificate.get("status"),
             binding_kind=binding_kind,
         )
+    if certificate.get("schema_version") != "pol-validation-certificate-v12":
+        raise _failure(
+            path="$.certificate.schema_version",
+            allowed="pol-validation-certificate-v12",
+            requested=certificate.get("schema_version"),
+            binding_kind=binding_kind,
+        )
     foundation = certificate.get("foundation_contract")
     if not isinstance(foundation, Mapping):
         raise _failure(
             path="$.certificate.foundation_contract",
             allowed="object",
             requested=foundation,
+            binding_kind=binding_kind,
+        )
+    if foundation.get("schema_version") != (
+        "pol-validation-foundation-contract-v8"
+    ):
+        raise _failure(
+            path="$.foundation_contract.schema_version",
+            allowed="pol-validation-foundation-contract-v8",
+            requested=foundation.get("schema_version"),
+            binding_kind=binding_kind,
+        )
+    if certificate.get("foundation_contract_hash") != stable_object_hash(
+        dict(foundation)
+    ):
+        raise _failure(
+            path="$.certificate.foundation_contract_hash",
+            allowed=stable_object_hash(dict(foundation)),
+            requested=certificate.get("foundation_contract_hash"),
             binding_kind=binding_kind,
         )
     try:
@@ -225,6 +282,14 @@ def _foundation_checks(
             requested=requested,
             binding_kind=binding_kind,
         )
+    expected_calibration, _ = _split_provenance(validation_spec)
+    _exact_check(
+        checks,
+        path="$.foundation_contract.calibration_provenance",
+        allowed=foundation.get("calibration_provenance"),
+        requested=expected_calibration,
+        binding_kind=binding_kind,
+    )
     general = foundation.get("general_foundation_checks")
     if not isinstance(general, Mapping):
         raise _failure(
@@ -268,13 +333,204 @@ def _proof_with_hash(payload: dict[str, Any]) -> dict[str, Any]:
 def _dataset_condition(
     dataset_spec: DatasetSpec, validation_spec: ValidationSpec
 ) -> dict[str, Any]:
+    _, split = _split_provenance(validation_spec)
     return {
         "reference_nx": int(dataset_spec.reference_nx),
         "target": dataset_spec.target.model_dump(mode="json"),
         "dtype": validation_spec.samples.dtype,
         "domain_length": float(validation_spec.domain.length),
+        "split": split,
         **execution_device_policy(),
     }
+
+
+def _validated_condition_binding(
+    contract: Mapping[str, Any],
+    dataset_condition: Mapping[str, Any],
+    *,
+    binding_kind: str,
+) -> tuple[list[dict[str, Any]], int, int]:
+    try:
+        validate_target_reference_contract(contract)
+    except ValueError as exc:
+        raise _failure(
+            path="$.certificate.target_reference_contract",
+            allowed="self-consistent pol-target-reference-contract-v4",
+            requested=dict(contract),
+            binding_kind=binding_kind,
+        ) from exc
+    target = dataset_condition.get("target")
+    if not isinstance(target, Mapping):
+        raise _failure(
+            path="$.dataset.target",
+            allowed="canonical evolution object",
+            requested=target,
+            binding_kind=binding_kind,
+        )
+    target_system = target.get("system")
+    if not isinstance(target_system, Mapping):
+        raise _failure(
+            path="$.dataset.target.system",
+            allowed="canonical system object",
+            requested=target_system,
+            binding_kind=binding_kind,
+        )
+    checks: list[dict[str, Any]] = []
+    system_kind = contract["system_kind"]
+    exact_values = (
+        (
+            "$.dataset.target.system.kind",
+            system_kind,
+            target_system.get("kind"),
+        ),
+        (
+            "$.dataset.target.time",
+            contract.get("evolution_time"),
+            target.get("time"),
+        ),
+        (
+            "$.dataset.dtype",
+            contract.get("dtype"),
+            dataset_condition.get("dtype"),
+        ),
+        (
+            "$.dataset.domain_length",
+            contract.get("domain_length"),
+            dataset_condition.get("domain_length"),
+        ),
+    )
+    for path, allowed, requested in exact_values:
+        _exact_check(
+            checks,
+            path=path,
+            allowed=allowed,
+            requested=requested,
+            binding_kind=binding_kind,
+        )
+
+    requested_invariants = canonical_invariant_parameters(
+        str(system_kind),
+        target_system,
+    )
+    invariants = contract["invariant_parameters"]
+    for name in sorted(invariants):
+        _exact_check(
+            checks,
+            path=f"$.dataset.target.system.{name}",
+            allowed=invariants[name],
+            requested=requested_invariants.get(name),
+            binding_kind=binding_kind,
+        )
+
+    relation = contract["allowed_refinement_relation"]
+    reference = contract["reference_resolution"]
+    allowed_nx = relation["reference_nx_allowed_values"]
+    requested_nx = dataset_condition.get("reference_nx")
+    allowed_nx_index = _canonical_index(allowed_nx, requested_nx)
+    if allowed_nx_index is None:
+        raise _failure(
+            path="$.dataset.reference_nx",
+            allowed=allowed_nx,
+            requested=requested_nx,
+            binding_kind=binding_kind,
+        )
+    reference_candidates = reference["candidates"]
+    matched_reference_index = _canonical_index(
+        reference_candidates,
+        requested_nx,
+    )
+    if matched_reference_index is None:
+        raise _failure(
+            path="$.dataset.reference_nx",
+            allowed=reference_candidates,
+            requested=requested_nx,
+            binding_kind=binding_kind,
+        )
+    checks.append(
+        {
+            "field_path": "$.dataset.reference_nx",
+            "comparison": "exact_member_of_validated_candidate_suffix",
+            "certificate_or_allowed_value": allowed_nx,
+            "requested_dataset_value": requested_nx,
+            "status": "pass",
+        }
+    )
+
+    requested_condition = canonical_numerical_condition(
+        str(system_kind),
+        target_system,
+        evolution_time=float(contract["evolution_time"]),
+    )
+    allowed_conditions = relation[
+        "numerical_condition_allowed_values"
+    ]
+    for field in requested_condition:
+        allowed_field_values: list[Any] = []
+        for candidate in allowed_conditions:
+            if (
+                isinstance(candidate, Mapping)
+                and _canonical_index(
+                    allowed_field_values,
+                    candidate.get(field),
+                )
+                is None
+            ):
+                allowed_field_values.append(candidate.get(field))
+        requested_value = requested_condition[field]
+        if _canonical_index(allowed_field_values, requested_value) is None:
+            field_path = {
+                "requested_outer_dt": "dt",
+                "requested_fine_dt": "fine_dt",
+            }.get(field, field)
+            if field in {
+                "outer_step_count",
+                "effective_substep",
+                "substeps_per_outer",
+            }:
+                path = "$.dataset.target.numerical_condition"
+            else:
+                path = (
+                    "$.dataset.target.system.solver_condition"
+                    if system_kind == "heat" and field == "solver"
+                    else f"$.dataset.target.system.{field_path}"
+                )
+            raise _failure(
+                path=path,
+                allowed=allowed_field_values,
+                requested=requested_value,
+                binding_kind=binding_kind,
+            )
+    if _canonical_index(allowed_conditions, requested_condition) is None:
+        raise _failure(
+            path="$.dataset.target.numerical_condition",
+            allowed=allowed_conditions,
+            requested=requested_condition,
+            binding_kind=binding_kind,
+        )
+    method = contract["numerical_method_validation"]
+    matched_condition_index = _canonical_index(
+        method["candidates"],
+        requested_condition,
+    )
+    if matched_condition_index is None:
+        raise _failure(
+            path="$.dataset.target.numerical_condition",
+            allowed=method["candidates"],
+            requested=requested_condition,
+            binding_kind=binding_kind,
+        )
+    checks.append(
+        {
+            "field_path": "$.dataset.target.numerical_condition",
+            "comparison": (
+                "canonical_exact_member_of_validated_candidate_suffix"
+            ),
+            "certificate_or_allowed_value": allowed_conditions,
+            "requested_dataset_value": requested_condition,
+            "status": "pass",
+        }
+    )
+    return checks, matched_reference_index, matched_condition_index
 
 
 def _evaluate_validated_reference(
@@ -295,169 +551,29 @@ def _evaluate_validated_reference(
             requested=contract,
             binding_kind=binding_kind,
         )
-    checks: list[dict[str, Any]] = []
-    target = dataset_spec.target.model_dump(mode="json")
-    target_system = target["system"]
-    exact_values = (
-        (
-            "$.dataset.target.system.kind",
-            contract.get("system_kind"),
-            target_system.get("kind"),
-        ),
-        (
-            "$.dataset.target.time",
-            contract.get("evolution_time"),
-            target.get("time"),
-        ),
-        (
-            "$.dataset.dtype",
-            contract.get("dtype"),
-            validation_spec.samples.dtype,
-        ),
-        (
-            "$.dataset.domain_length",
-            contract.get("domain_length"),
-            float(validation_spec.domain.length),
-        ),
-    )
-    for path, allowed, requested in exact_values:
-        _exact_check(
-            checks,
-            path=path,
-            allowed=allowed,
-            requested=requested,
-            binding_kind=binding_kind,
-        )
-    invariants = contract.get("invariant_parameters")
-    if not isinstance(invariants, Mapping):
-        raise _failure(
-            path="$.certificate.target_reference_contract.invariant_parameters",
-            allowed="object",
-            requested=invariants,
-            binding_kind=binding_kind,
-        )
-    for name in sorted(invariants):
-        _exact_check(
-            checks,
-            path=f"$.dataset.target.system.{name}",
-            allowed=invariants[name],
-            requested=target_system.get(name),
-            binding_kind=binding_kind,
-        )
-
-    relation = contract.get("allowed_refinement_relation")
-    reference = contract.get("reference_resolution")
-    time_discretization = contract.get("time_discretization")
-    if not isinstance(relation, Mapping):
-        raise _failure(
-            path="$.certificate.target_reference_contract.allowed_refinement_relation",
-            allowed="machine-readable object",
-            requested=relation,
-            binding_kind=binding_kind,
-        )
-    if not isinstance(reference, Mapping) or not isinstance(
-        time_discretization, Mapping
+    if certificate.get("target_reference_contract_hash") != (
+        stable_object_hash(dict(contract))
     ):
         raise _failure(
-            path="$.certificate.target_reference_contract",
-            allowed="reference_resolution and time_discretization objects",
-            requested={
-                "reference_resolution": reference,
-                "time_discretization": time_discretization,
-            },
+            path="$.certificate.target_reference_contract_hash",
+            allowed=stable_object_hash(dict(contract)),
+            requested=certificate.get("target_reference_contract_hash"),
             binding_kind=binding_kind,
         )
-    allowed_nx = relation.get("reference_nx_allowed_values")
-    if not isinstance(allowed_nx, list):
-        raise _failure(
-            path="$.certificate.target_reference_contract.allowed_refinement_relation.reference_nx_allowed_values",
-            allowed="list",
-            requested=allowed_nx,
-            binding_kind=binding_kind,
-        )
-    requested_nx = int(dataset_spec.reference_nx)
-    allowed_nx_index = _canonical_index(allowed_nx, requested_nx)
-    if allowed_nx_index is None:
-        raise _failure(
-            path="$.dataset.reference_nx",
-            allowed=allowed_nx,
-            requested=requested_nx,
-            binding_kind=binding_kind,
-        )
-    reference_candidates = reference.get("candidates")
-    matched_reference_index = (
-        _canonical_index(reference_candidates, requested_nx)
-        if isinstance(reference_candidates, list)
-        else None
+    dataset_condition = _dataset_condition(dataset_spec, validation_spec)
+    (
+        checks,
+        matched_reference_index,
+        matched_condition_index,
+    ) = _validated_condition_binding(
+        contract,
+        dataset_condition,
+        binding_kind=binding_kind,
     )
-    checks.append(
-        {
-            "field_path": "$.dataset.reference_nx",
-            "comparison": "exact_member_of_validated_candidate_suffix",
-            "certificate_or_allowed_value": allowed_nx,
-            "requested_dataset_value": requested_nx,
-            "status": "pass",
-        }
-    )
-
-    requested_time_candidate = {
-        "dt": target_system.get("dt"),
-        "fine_dt": target_system.get("fine_dt"),
-        "solver": target_system.get("solver"),
-        "dealias": target_system.get("dealias"),
-    }
-    allowed_time = relation.get("time_candidate_allowed_values")
-    if not isinstance(allowed_time, list):
-        raise _failure(
-            path="$.certificate.target_reference_contract.allowed_refinement_relation.time_candidate_allowed_values",
-            allowed="list",
-            requested=allowed_time,
-            binding_kind=binding_kind,
-        )
-    for field in ("solver", "dealias", "dt", "fine_dt"):
-        allowed_field_values: list[Any] = []
-        for candidate in allowed_time:
-            if (
-                isinstance(candidate, Mapping)
-                and _canonical_index(
-                    allowed_field_values, candidate.get(field)
-                )
-                is None
-            ):
-                allowed_field_values.append(candidate.get(field))
-        requested_value = requested_time_candidate[field]
-        if _canonical_index(allowed_field_values, requested_value) is None:
-            raise _failure(
-                path=f"$.dataset.target.system.{field}",
-                allowed=allowed_field_values,
-                requested=requested_value,
-                binding_kind=binding_kind,
-            )
-    if _canonical_index(allowed_time, requested_time_candidate) is None:
-        raise _failure(
-            path="$.dataset.target.time_candidate",
-            allowed=allowed_time,
-            requested=requested_time_candidate,
-            binding_kind=binding_kind,
-        )
-    time_candidates = time_discretization.get("candidates")
-    matched_time_index = (
-        _canonical_index(time_candidates, requested_time_candidate)
-        if isinstance(time_candidates, list)
-        else None
-    )
-    checks.append(
-        {
-            "field_path": "$.dataset.target.time_candidate",
-            "comparison": "canonical_exact_member_of_validated_candidate_suffix",
-            "certificate_or_allowed_value": allowed_time,
-            "requested_dataset_value": requested_time_candidate,
-            "status": "pass",
-        }
-    )
+    relation = contract["allowed_refinement_relation"]
     return _proof_with_hash(
         {
-            "schema_version": "pol-dataset-binding-proof-v3",
+            "schema_version": "pol-dataset-binding-proof-v7",
             **execution_device_policy(),
             "binding_kind": binding_kind,
             "status": "pass",
@@ -467,13 +583,16 @@ def _evaluate_validated_reference(
                 "grf_sampler_domain_length"
             ],
             "grf_sampler_semantics": foundation["grf_sampler_semantics"],
+            "calibration_provenance": dict(
+                foundation["calibration_provenance"]
+            ),
             "foundation_contract_hash": stable_object_hash(foundation),
             "foundation_checks": foundation_checks,
             "validated_condition": dict(contract),
             "allowed_refinement_relation": dict(relation),
-            "dataset_condition": _dataset_condition(dataset_spec, validation_spec),
+            "dataset_condition": dataset_condition,
             "matched_reference_candidate_index": matched_reference_index,
-            "matched_time_candidate_index": matched_time_index,
+            "matched_numerical_condition_index": matched_condition_index,
             "per_field_checks": checks,
         }
     )
@@ -520,7 +639,7 @@ def _evaluate_foundation_only(
     reason = dataset_spec.binding.reason
     return _proof_with_hash(
         {
-            "schema_version": "pol-dataset-binding-proof-v3",
+            "schema_version": "pol-dataset-binding-proof-v7",
             **execution_device_policy(),
             "binding_kind": binding_kind,
             "status": "pass",
@@ -530,6 +649,9 @@ def _evaluate_foundation_only(
                 "grf_sampler_domain_length"
             ],
             "grf_sampler_semantics": foundation["grf_sampler_semantics"],
+            "calibration_provenance": dict(
+                foundation["calibration_provenance"]
+            ),
             "foundation_contract_hash": stable_object_hash(foundation),
             "foundation_contract": dict(foundation),
             "foundation_checks": checks,
@@ -563,7 +685,7 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
     proof_hash = copied.pop("proof_hash", None)
     if not isinstance(proof_hash, str) or stable_object_hash(copied) != proof_hash:
         raise ValueError("dataset binding proof hash mismatch")
-    if copied.get("schema_version") != "pol-dataset-binding-proof-v3":
+    if copied.get("schema_version") != "pol-dataset-binding-proof-v7":
         raise ValueError("unsupported dataset binding proof schema")
     verify_execution_device_policy(
         copied,
@@ -575,6 +697,7 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
     target_status = copied.get("target_reference_validation_status")
     sampler_domain_length = copied.get("grf_sampler_domain_length")
     sampler_semantics = copied.get("grf_sampler_semantics")
+    calibration = copied.get("calibration_provenance")
     dataset_condition = copied.get("dataset_condition")
     if sampler_semantics != GRF_SAMPLER_SEMANTICS:
         raise ValueError("dataset binding proof has unsupported GRF sampler semantics")
@@ -593,6 +716,42 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
         dataset_condition,
         boundary="dataset binding proof condition",
     )
+    if not isinstance(calibration, Mapping):
+        raise ValueError("dataset binding proof has no calibration provenance")
+    split_condition = dataset_condition.get("split")
+    if not isinstance(split_condition, Mapping):
+        raise ValueError("dataset binding proof has no split condition")
+    try:
+        calibration_ids = calibration.get("calibration_sample_ids")
+        if not isinstance(calibration_ids, list):
+            raise ValueError("calibration_sample_ids must be a list")
+        total_samples = calibration.get("total_samples")
+        n_train = calibration.get("n_train")
+        n_validation = calibration.get("n_validation")
+        n_test = calibration.get("n_test")
+        seed = calibration.get("seed")
+        split = build_data_split(
+            total_samples=total_samples,
+            n_train=n_train,
+            n_validation=n_validation,
+            n_test=n_test,
+            seed=seed,
+        )
+        sample_ids = torch.arange(split.total_samples, dtype=torch.long)
+        expected_calibration = calibration_split_provenance(
+            split,
+            calibration_ids,
+            sample_ids=sample_ids,
+        )
+        expected_split = split_contract(split, sample_ids=sample_ids)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "dataset binding proof has invalid calibration split provenance"
+        ) from exc
+    if not _canonical_equal(dict(calibration), expected_calibration):
+        raise ValueError("dataset binding proof calibration provenance mismatch")
+    if not _canonical_equal(dict(split_condition), expected_split):
+        raise ValueError("dataset binding proof split condition mismatch")
     if kind == "validated_reference":
         if target_status != "validated":
             raise ValueError(
@@ -602,7 +761,7 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             "validated_condition",
             "allowed_refinement_relation",
             "matched_reference_candidate_index",
-            "matched_time_candidate_index",
+            "matched_numerical_condition_index",
             "per_field_checks",
         )
         expected_keys = {
@@ -615,13 +774,14 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             "certificate_artifact_id",
             "grf_sampler_domain_length",
             "grf_sampler_semantics",
+            "calibration_provenance",
             "foundation_contract_hash",
             "foundation_checks",
             "validated_condition",
             "allowed_refinement_relation",
             "dataset_condition",
             "matched_reference_candidate_index",
-            "matched_time_candidate_index",
+            "matched_numerical_condition_index",
             "per_field_checks",
             "proof_hash",
         }
@@ -631,6 +791,43 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
         ):
             raise ValueError(
                 "validated-reference proof GRF sampler domain mismatch"
+            )
+        try:
+            (
+                expected_checks,
+                expected_reference_index,
+                expected_condition_index,
+            ) = _validated_condition_binding(
+                validated_condition,
+                dataset_condition,
+                binding_kind="validated_reference",
+            )
+        except DatasetBindingError as exc:
+            raise ValueError(
+                "validated-reference proof condition binding mismatch"
+            ) from exc
+        if not _canonical_equal(
+            copied.get("allowed_refinement_relation"),
+            validated_condition.get("allowed_refinement_relation"),
+        ):
+            raise ValueError(
+                "validated-reference proof refinement relation mismatch"
+            )
+        if (
+            copied.get("matched_reference_candidate_index")
+            != expected_reference_index
+            or copied.get("matched_numerical_condition_index")
+            != expected_condition_index
+        ):
+            raise ValueError(
+                "validated-reference proof matched candidate index mismatch"
+            )
+        if not _canonical_equal(
+            copied.get("per_field_checks"),
+            expected_checks,
+        ):
+            raise ValueError(
+                "validated-reference proof per-field checks mismatch"
             )
     elif kind == "foundation_only":
         if target_status != "not_claimed":
@@ -651,6 +848,7 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             "certificate_artifact_id",
             "grf_sampler_domain_length",
             "grf_sampler_semantics",
+            "calibration_provenance",
             "foundation_contract_hash",
             "foundation_contract",
             "foundation_checks",
@@ -691,6 +889,13 @@ def verify_binding_proof(proof: Mapping[str, Any]) -> dict[str, Any]:
             dict(foundation)
         ) != copied.get("foundation_contract_hash"):
             raise ValueError("foundation-only proof foundation contract mismatch")
+        if not _canonical_equal(
+            foundation.get("calibration_provenance"),
+            calibration,
+        ):
+            raise ValueError(
+                "foundation-only proof calibration provenance mismatch"
+            )
         verify_execution_device_policy(
             foundation,
             boundary="foundation-only dataset binding proof",

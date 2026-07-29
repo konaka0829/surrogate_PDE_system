@@ -5,6 +5,7 @@ import math
 import pytest
 import torch
 
+from pol.learning.metrics import symmetric_field_discrepancy
 from pol.numerics.burgers import (
     burgers_nonlinear_hat,
     burgers_split_step_outer,
@@ -21,7 +22,8 @@ from pol.numerics.etdrk4 import (
     simulate_burgers_etdrk4_trajectory,
 )
 from pol.numerics.initial_conditions import sample_gaussian_random_field_initial_conditions
-from pol.runtime.hashing import tensor_sha256
+from pol.systems.burgers import step_metadata
+from pol.systems.reaction_diffusion import solve_reaction_diffusion
 
 
 def _mixed_mode_field(nx: int) -> torch.Tensor:
@@ -32,6 +34,40 @@ def _mixed_mode_field(nx: int) -> torch.Tensor:
         + 0.4 * torch.cos(2.0 * torch.pi * 2.0 * x)
         + 0.25 * torch.sin(2.0 * torch.pi * highest_mode * x)
     ).unsqueeze(0)
+
+
+def test_burgers_step_metadata_distinguishes_requested_and_effective_steps() -> None:
+    metadata = step_metadata(
+        solver="semi_implicit",
+        dt=0.01,
+        fine_dt=0.003,
+        final_time=0.02,
+    )
+    assert metadata == {
+        "solver": "split_step",
+        "requested_outer_dt": 0.01,
+        "requested_fine_dt": 0.003,
+        "outer_step_count": 2,
+        "effective_substep": 0.0025,
+        "substeps_per_outer": 4,
+    }
+
+
+def test_etdrk4_step_metadata_uses_requested_dt_as_canonical_step() -> None:
+    metadata = step_metadata(
+        solver="fourier_pseudospectral_etdrk4",
+        dt=0.005,
+        fine_dt=None,
+        final_time=0.02,
+    )
+    assert metadata == {
+        "solver": "etdrk4",
+        "requested_outer_dt": 0.005,
+        "requested_fine_dt": None,
+        "outer_step_count": 4,
+        "effective_substep": 0.005,
+        "substeps_per_outer": 1,
+    }
 
 
 def _explicit_split_step_reference(
@@ -98,6 +134,94 @@ def _explicit_split_step_reference(
                 ).clone()
             )
     return observed
+
+
+def _pre_correction_even_split_step_reference(
+    u0: torch.Tensor,
+    *,
+    dt: float,
+    obs_steps: list[int],
+    nu: float,
+    fine_dt: float,
+    b: float,
+    dealias: bool,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Reproduce the old width-inferred algorithm where even nx=2*(width-1)."""
+    nx = u0.shape[-1]
+    if nx % 2 != 0:
+        raise ValueError("pre-correction reference is valid only for an even grid")
+
+    frequencies = torch.fft.rfftfreq(
+        nx,
+        d=1.0 / nx,
+        device=u0.device,
+    )
+    k = (2.0 * torch.pi * frequencies).to(dtype=u0.dtype)
+    mask = (
+        torch.arange(nx // 2 + 1, device=u0.device) <= nx // 3
+    ).to(dtype=u0.dtype)
+
+    def apply_dealias(value: torch.Tensor) -> torch.Tensor:
+        if not dealias:
+            return value
+        return value * mask.to(
+            device=value.device,
+            dtype=value.real.dtype,
+        ).unsqueeze(0)
+
+    def nonlinear(value: torch.Tensor) -> torch.Tensor:
+        rfft_width = value.shape[-1]
+        inferred_nx = 2 * (rfft_width - 1)
+        assert inferred_nx == nx
+        real_values = torch.fft.irfft(
+            value,
+            n=inferred_nx,
+            dim=-1,
+            norm="forward",
+        )
+        nonlinear_hat = (
+            -0.5j
+            * b
+            * k
+            * torch.fft.rfft(
+                real_values * real_values,
+                dim=-1,
+                norm="forward",
+            )
+        )
+        return apply_dealias(nonlinear_hat)
+
+    initial_hat = torch.fft.rfft(u0, dim=-1, norm="forward")
+    rfft_width = initial_hat.shape[-1]
+    inferred_nx = 2 * (rfft_width - 1)
+    assert inferred_nx == nx
+    initial_nonlinear_hat = nonlinear(initial_hat)
+
+    n_sub = max(1, int(math.ceil(dt / fine_dt))) if fine_dt > 0.0 else 1
+    h = dt / float(n_sub)
+    heat = torch.exp(-nu * k.pow(2) * h).to(dtype=initial_hat.real.dtype)
+    u_hat = apply_dealias(initial_hat)
+
+    observed: list[torch.Tensor] = []
+    obs_sorted = sorted(set(int(value) for value in obs_steps))
+    obs_ptr = 0
+    for step in range(1, obs_sorted[-1] + 1):
+        for _ in range(n_sub):
+            u_hat = u_hat * heat
+            u_hat = u_hat + h * nonlinear(u_hat)
+            u_hat = apply_dealias(u_hat)
+        while obs_ptr < len(obs_sorted) and step == obs_sorted[obs_ptr]:
+            observed.append(
+                torch.fft.irfft(
+                    u_hat,
+                    n=nx,
+                    dim=-1,
+                    norm="forward",
+                ).clone()
+            )
+            obs_ptr += 1
+
+    return initial_nonlinear_hat, observed
 
 
 def test_etdrk4_zero_linear_part_matches_classical_rk4() -> None:
@@ -248,38 +372,30 @@ def test_split_step_short_trajectory_matches_independent_reference(
         )
 
 
-@pytest.mark.parametrize(
-    ("dealias", "nonlinear_hash", "trajectory_hashes"),
-    [
-        (
-            False,
-            "d2e26a3545d88d85940bf60cc196b4f0c8f6aa706e3fb2fc7223847fc2a826a2",
-            [
-                "961f4a8a516c6e4ece14eeabb2e8b8b2c61bd82a0a06605f314e073671fd40e3",
-                "df716d79d542fabeb809cf9878ff737def54eb78b2d47878d23d699f74cf5c89",
-            ],
-        ),
-        (
-            True,
-            "58ffd9295e680931d22d19ead40f5596ec73fd67d8b297a9897709b228b3c28e",
-            [
-                "ff3f11110107fc14c9c143ddf6fdf234fc4a00b6a9bba9efd0a0bca3e687a943",
-                "c3163f74b2b6d7a4e2597a2d509454f2c54491fb2b21b6a6fce89a20fd396bb3",
-            ],
-        ),
-    ],
-)
+@pytest.mark.parametrize("dealias", [False, True])
 def test_split_step_even_grid_matches_pre_correction_exact_regression(
     dealias: bool,
-    nonlinear_hash: str,
-    trajectory_hashes: list[str],
 ) -> None:
     nx = 16
     u0 = _mixed_mode_field(nx)
+    assert u0.dtype == torch.float64
+
+    expected_nonlinear, expected_trajectory = (
+        _pre_correction_even_split_step_reference(
+            u0,
+            dt=0.01,
+            obs_steps=[1, 2],
+            nu=0.05,
+            fine_dt=0.005,
+            b=0.7,
+            dealias=dealias,
+        )
+    )
+
     u_hat = torch.fft.rfft(u0, n=nx, dim=-1, norm="forward")
     k = make_wavenumbers(nx, u0.device, u0.dtype)
     mask = make_dealias_mask(nx, u0.device, u0.dtype) if dealias else None
-    nonlinear = burgers_nonlinear_hat(
+    actual_nonlinear = burgers_nonlinear_hat(
         u_hat,
         k,
         nx=nx,
@@ -287,7 +403,7 @@ def test_split_step_even_grid_matches_pre_correction_exact_regression(
         dealias=dealias,
         mask=mask,
     )
-    trajectory = simulate_burgers_split_step(
+    actual_trajectory = simulate_burgers_split_step(
         u0,
         dt=0.01,
         Tr=0.02,
@@ -298,8 +414,14 @@ def test_split_step_even_grid_matches_pre_correction_exact_regression(
         dealias=dealias,
     )
 
-    assert tensor_sha256(nonlinear) == nonlinear_hash
-    assert [tensor_sha256(value) for value in trajectory] == trajectory_hashes
+    assert torch.equal(actual_nonlinear, expected_nonlinear)
+    assert len(actual_trajectory) == len(expected_trajectory) == 2
+    for actual_step, expected_step in zip(
+        actual_trajectory,
+        expected_trajectory,
+        strict=True,
+    ):
+        assert torch.equal(actual_step, expected_step)
 
 
 def test_split_step_rejects_spectral_contract_mismatches() -> None:
@@ -620,6 +742,222 @@ def test_burgers_etdrk4_terminal_state_is_finite() -> None:
     u0 = torch.sin(2.0 * torch.pi * x).unsqueeze(0)
     out = simulate_burgers_etdrk4(u0, nu=0.01, T=0.02, dt=0.005)
     assert out.shape == u0.shape and torch.isfinite(out).all()
+
+
+@pytest.mark.parametrize("nx", [15, 16])
+def test_symmetric_field_discrepancy_is_swap_invariant_with_low_modes(
+    nx: int,
+) -> None:
+    x = torch.arange(nx, dtype=torch.float64) / nx
+    a = (
+        0.2
+        + 0.3 * torch.sin(2.0 * torch.pi * x)
+        + 0.1 * torch.cos(4.0 * torch.pi * x)
+    ).unsqueeze(0)
+    b = (
+        0.2
+        + 0.29 * torch.sin(2.0 * torch.pi * x)
+        + 0.08 * torch.cos(4.0 * torch.pi * x)
+    ).unsqueeze(0)
+    forward = symmetric_field_discrepancy(
+        a,
+        b,
+        q=5,
+        domain_length=1.0,
+    )
+    reverse = symmetric_field_discrepancy(
+        b,
+        a,
+        q=5,
+        domain_length=1.0,
+    )
+    assert forward == reverse
+    assert forward["mean_absolute_l2"] > 0.0
+    assert forward["mean_relative_l2"] > 0.0
+    assert forward["low_mode_relative_l2"] > 0.0
+    assert all(math.isfinite(value) for value in forward.values())
+
+
+@pytest.mark.parametrize("nx", [15, 16])
+@pytest.mark.parametrize("nonlinear_filter", ["none", "two_thirds"])
+def test_reaction_diffusion_zero_equilibrium_is_exact(
+    nx: int,
+    nonlinear_filter: str,
+) -> None:
+    initial = torch.zeros((2, nx), dtype=torch.float64)
+    result = solve_reaction_diffusion(
+        initial,
+        nu=0.07,
+        alpha=1.2,
+        beta=0.9,
+        time=0.05,
+        dt=0.01,
+        domain_length=2.3,
+        nonlinear_filter=nonlinear_filter,
+    )
+    assert torch.equal(result.values, initial)
+    assert result.metadata["step_count"] == 5
+
+
+@pytest.mark.parametrize(
+    ("constant", "nx", "domain_length", "nonlinear_filter"),
+    [
+        (0.25, 15, 2.5, "none"),
+        (-0.4, 16, 1.7, "two_thirds"),
+    ],
+)
+def test_reaction_diffusion_constant_field_matches_independent_scalar_recurrence(
+    constant: float,
+    nx: int,
+    domain_length: float,
+    nonlinear_filter: str,
+) -> None:
+    dt = 0.01
+    steps = 6
+    alpha = 0.8
+    beta = 1.1
+    expected_scalar = constant
+    for _ in range(steps):
+        expected_scalar = (
+            expected_scalar
+            + dt * alpha * expected_scalar
+            - dt * beta * expected_scalar**3
+        )
+    initial = torch.full((2, nx), constant, dtype=torch.float64)
+    actual = solve_reaction_diffusion(
+        initial,
+        nu=0.07,
+        alpha=alpha,
+        beta=beta,
+        time=steps * dt,
+        dt=dt,
+        domain_length=domain_length,
+        nonlinear_filter=nonlinear_filter,
+    ).values
+    expected = torch.full_like(actual, expected_scalar)
+    assert torch.allclose(actual, expected, atol=2e-14, rtol=2e-14)
+
+
+@pytest.mark.parametrize(
+    ("sign", "nx", "nonlinear_filter"),
+    [(1.0, 15, "none"), (-1.0, 16, "two_thirds")],
+)
+def test_reaction_diffusion_nonzero_constant_equilibria_are_preserved(
+    sign: float,
+    nx: int,
+    nonlinear_filter: str,
+) -> None:
+    alpha = 2.0
+    beta = 0.5
+    equilibrium = sign * math.sqrt(alpha / beta)
+    initial = torch.full((1, nx), equilibrium, dtype=torch.float64)
+    actual = solve_reaction_diffusion(
+        initial,
+        nu=0.04,
+        alpha=alpha,
+        beta=beta,
+        time=0.05,
+        dt=0.01,
+        domain_length=1.8,
+        nonlinear_filter=nonlinear_filter,
+    ).values
+    assert torch.allclose(actual, initial, atol=2e-14, rtol=2e-14)
+
+
+@pytest.mark.parametrize(
+    ("nx", "domain_length", "mode", "basis", "nonlinear_filter"),
+    [
+        (15, 2.5, 2, "cosine", "none"),
+        (16, 1.7, 3, "sine", "two_thirds"),
+    ],
+)
+def test_reaction_diffusion_beta_zero_one_step_has_analytic_multiplier(
+    nx: int,
+    domain_length: float,
+    mode: int,
+    basis: str,
+    nonlinear_filter: str,
+) -> None:
+    dt = 0.005
+    nu = 0.07
+    alpha = 0.8
+    x = torch.arange(nx, dtype=torch.float64) * domain_length / nx
+    k = 2.0 * math.pi * mode / domain_length
+    values = torch.cos(k * x) if basis == "cosine" else torch.sin(k * x)
+    initial = values.unsqueeze(0)
+    expected = ((1.0 + dt * alpha) / (1.0 + dt * nu * k**2)) * initial
+    actual = solve_reaction_diffusion(
+        initial,
+        nu=nu,
+        alpha=alpha,
+        beta=0.0,
+        time=dt,
+        dt=dt,
+        domain_length=domain_length,
+        nonlinear_filter=nonlinear_filter,
+    ).values
+    assert torch.allclose(actual, expected, atol=2e-14, rtol=2e-14)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("nu", float("nan"), "finite"),
+        ("alpha", float("nan"), "finite"),
+        ("beta", float("nan"), "finite"),
+        ("time", float("nan"), "finite"),
+        ("dt", float("nan"), "finite"),
+        ("domain_length", float("nan"), "finite"),
+        ("dt", 0.0, "positive"),
+        ("time", 0.0, "positive"),
+        ("nonlinear_filter", "invalid", "nonlinear_filter"),
+    ],
+)
+def test_reaction_diffusion_rejects_invalid_parameters(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    kwargs: dict[str, object] = {
+        "nu": 0.1,
+        "alpha": 1.0,
+        "beta": 1.0,
+        "time": 0.02,
+        "dt": 0.01,
+        "domain_length": 1.0,
+        "nonlinear_filter": "two_thirds",
+    }
+    kwargs[field] = value
+    with pytest.raises(ValueError, match=message):
+        solve_reaction_diffusion(
+            torch.zeros((1, 15), dtype=torch.float64),
+            **kwargs,
+        )
+
+
+def test_reaction_diffusion_rejects_time_misalignment_and_nonfinite_state() -> None:
+    with pytest.raises(ValueError, match="must align"):
+        solve_reaction_diffusion(
+            torch.zeros((1, 15), dtype=torch.float64),
+            nu=0.1,
+            alpha=1.0,
+            beta=1.0,
+            time=0.02,
+            dt=0.006,
+            domain_length=1.0,
+        )
+    initial = torch.zeros((1, 15), dtype=torch.float64)
+    initial[0, 0] = torch.nan
+    with pytest.raises(FloatingPointError, match="NaN/Inf"):
+        solve_reaction_diffusion(
+            initial,
+            nu=0.1,
+            alpha=1.0,
+            beta=1.0,
+            time=0.02,
+            dt=0.01,
+            domain_length=1.0,
+        )
 
 
 @pytest.mark.parametrize(

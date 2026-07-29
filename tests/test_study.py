@@ -4,6 +4,8 @@ import copy
 import csv
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -15,7 +17,8 @@ from pol.learning.direct import (
     DIRECT_DECODER_POLICY,
 )
 from pol.runtime.artifacts import manifest_records
-from pol.runtime.io import write_csv, write_strict_json
+from pol.runtime.hashing import stable_object_hash
+from pol.runtime.io import file_sha256, write_csv, write_strict_json
 from pol.study.cache import FeatureStateCache
 from pol.study.runner import plan_study, regenerate_plots, run_study, verify_study_run
 from tests.helpers import write_json, write_tiny_stack
@@ -40,6 +43,58 @@ def _refresh_manifest_record(run_path: Path, relative_path: str) -> None:
     write_strict_json(manifest_path, manifest)
 
 
+def test_readout_and_evaluation_modules_import_independently() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import sys",
+                    "import pol.study.evaluation",
+                    "assert 'pol.study.runner' not in sys.modules",
+                    "assert 'pol.study.trial' not in sys.modules",
+                    "import pol.study.readouts",
+                    "assert 'pol.study.runner' not in sys.modules",
+                    "assert 'pol.study.trial' not in sys.modules",
+                    "from pol.study import run_study",
+                    "assert callable(run_study)",
+                )
+            ),
+        ],
+        check=True,
+    )
+
+
+def test_study_support_modules_import_without_runner_cycle() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import sys",
+                    "import pol.study.cases",
+                    "import pol.study.protocol",
+                    "import pol.study.results",
+                    "import pol.study.verification",
+                    "assert 'pol.study.runner' not in sys.modules",
+                    "from pol.study.runner import (",
+                    "    plan_study,",
+                    "    regenerate_plots,",
+                    "    run_study,",
+                    "    verify_study_run,",
+                    ")",
+                    "assert all(callable(value) for value in (",
+                    "    plan_study, regenerate_plots, run_study, verify_study_run",
+                    "))",
+                )
+            ),
+        ],
+        check=True,
+    )
+
+
 def test_plan_is_pure_and_scalar_is_a_one_cell_study(tmp_path: Path) -> None:
     _, _, study_path = write_tiny_stack(tmp_path)
     spec = load_study_spec(study_path, repo_root=tmp_path)
@@ -57,6 +112,9 @@ def test_global_axis_uses_same_study_executor(tmp_path: Path) -> None:
     plan = plan_study(spec)
     assert plan["case_count"] == 2
     assert {case["global_values"]["output.q"] for case in plan["cases"]} == {5, 9}
+    assert stable_object_hash(plan) == (
+        "4d5c2602acbd1f6172b84f9197f357951d736c47ef90e4e492182b05d873d342"
+    )
 
 
 def test_checked_in_observation_output_plan_keeps_q_greater_than_J_cells() -> None:
@@ -230,9 +288,9 @@ def test_frozen_decoder_mismatch_stops_before_test_evaluation(
     )
     spec = load_study_spec(study_path, repo_root=tmp_path)
 
-    import pol.study.runner as runner_module
+    import pol.study.protocol as protocol_module
 
-    original_save = runner_module.atomic_torch_save
+    original_save = protocol_module.atomic_torch_save
 
     def tampering_save(path: Path, value: dict[str, object]) -> None:
         tampered = copy.deepcopy(value)
@@ -248,7 +306,7 @@ def test_frozen_decoder_mismatch_stops_before_test_evaluation(
     def forbidden_test_evaluation(*args, **kwargs):
         raise AssertionError("test evaluation must not start")
 
-    monkeypatch.setattr(runner_module, "atomic_torch_save", tampering_save)
+    monkeypatch.setattr(protocol_module, "atomic_torch_save", tampering_save)
     monkeypatch.setattr(
         "pol.study.trial.TrialEngine.evaluate_test",
         forbidden_test_evaluation,
@@ -296,6 +354,62 @@ def test_study_freezes_selection_before_any_test_evaluation(tmp_path: Path) -> N
         result.summary["dataset_target_reference_validation_status"]
         == "not_claimed"
     )
+
+
+def test_freeze_protocol_cross_hashes_and_event_payloads(tmp_path: Path) -> None:
+    _, _, study_path = write_tiny_stack(tmp_path)
+    spec = load_study_spec(study_path, repo_root=tmp_path)
+    result = run_study(spec, repo_root=tmp_path)
+
+    selection = json.loads(
+        (result.path / "selection_record.json").read_text(encoding="utf-8")
+    )
+    selection_hash = stable_object_hash(selection)
+    plan = json.loads(
+        (result.path / "frozen_evaluation_plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    plan_hash = plan.pop("plan_content_hash")
+    assert stable_object_hash(plan) == plan_hash
+    archive = torch.load(
+        result.path / plan["frozen_models_file"],
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert plan["selection_record_hash"] == selection_hash
+    assert archive["selection_record_hash"] == selection_hash
+    assert file_sha256(result.path / plan["frozen_models_file"]) == (
+        plan["frozen_models_sha256"]
+    )
+    assert result.summary["selection_record_hash"] == selection_hash
+    assert result.summary["frozen_plan_hash"] == plan_hash
+
+    events = json.loads(
+        (result.path / "events.json").read_text(encoding="utf-8")
+    )
+    assert [event["event"] for event in events] == [
+        "selection_complete",
+        "convergence_complete",
+        "freeze_written",
+        "freeze_read_back",
+        "first_test_state_solve",
+        "first_test_metric",
+    ]
+    assert events[0]["selection_record_hash"] == selection_hash
+    assert events[1]["status"] == {"heat": "not_requested"}
+    assert all(
+        event["plan_content_hash"] == plan_hash for event in events[2:]
+    )
+
+    for name in (
+        "test_metrics.csv",
+        "random_feature_seed_metrics.csv",
+        "random_feature_ensemble_metrics.csv",
+    ):
+        for row in _read_csv(result.path / name):
+            assert row["selection_record_hash"] == selection_hash
+            assert row["frozen_plan_hash"] == plan_hash
 
 
 def test_random_feature_test_tables_bind_seed_summary_and_ensemble(
@@ -462,6 +576,21 @@ def test_study_verification_checks_frozen_plan_semantics(tmp_path: Path) -> None
         verify_study_run(result.path)
 
 
+def test_study_verifier_rejects_unmanifested_file_tamper(
+    tmp_path: Path,
+) -> None:
+    _, _, study_path = write_tiny_stack(tmp_path)
+    result = run_study(
+        load_study_spec(study_path, repo_root=tmp_path),
+        repo_root=tmp_path,
+    )
+    selection_path = result.path / "selection_record.json"
+    selection_path.write_bytes(selection_path.read_bytes() + b" ")
+
+    with pytest.raises(ValueError, match="bytes differ from manifest"):
+        verify_study_run(result.path)
+
+
 def test_study_verification_checks_test_table_bindings(tmp_path: Path) -> None:
     _, _, study_path = write_tiny_stack(tmp_path)
     spec = load_study_spec(study_path, repo_root=tmp_path)
@@ -581,3 +710,31 @@ def test_study_reuses_verified_run_and_regenerates_plots(tmp_path: Path) -> None
     created = regenerate_plots(spec, first.path)
     assert created == ["validation_error_vs_q.png"]
     verify_study_run(first.path)
+
+
+def test_plots_only_does_not_start_dataset_or_feature_computation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, study_path = write_tiny_stack(tmp_path, generate_plots=True)
+    spec = load_study_spec(study_path, repo_root=tmp_path)
+    first = run_study(spec, repo_root=tmp_path)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("plots-only must not start numerical computation")
+
+    monkeypatch.setattr("pol.study.runner.run_search", forbidden)
+    monkeypatch.setattr(
+        "pol.study.cache.FeatureStateCache.get_or_solve",
+        forbidden,
+    )
+    monkeypatch.setattr("pol.data.dataset.evolve", forbidden)
+    result = run_study(spec, repo_root=tmp_path, plots_only=True)
+
+    assert result.reused
+    assert result.path == first.path
+    assert result.summary == {
+        "status": "plots_regenerated",
+        "created": ["validation_error_vs_q.png"],
+    }
+    verify_study_run(result.path)

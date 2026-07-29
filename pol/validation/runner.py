@@ -1,24 +1,39 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterable
 
 import torch
 
 from pol.artifacts import ArtifactRef, ArtifactStore, verify_artifact
-from pol.config.models import BurgersTimeCandidateSpec, ValidationSpec
+from pol.config.models import (
+    BurgersConvergenceReferenceSpec,
+    BurgersTimeCandidateSpec,
+    EnabledBurgersCrossSolverValidationSpec,
+    HeatAnalyticReferenceSpec,
+    ReactionDiffusionConvergenceReferenceSpec,
+    ReactionDiffusionTimeCandidateSpec,
+    ReferenceToleranceSpec,
+    ValidationSpec,
+)
 from pol.data.initial_conditions import (
     GRF_SAMPLER_SEMANTICS,
     InitialConditionArchive,
     generate_grf_archive,
 )
+from pol.data.splits import build_data_split, calibration_split_provenance
 from pol.learning.direct import (
     decode_point_observation_to_real_fourier,
     fixed_fourier_decoder_bandwidth,
 )
-from pol.learning.metrics import samplewise_l2_errors
+from pol.learning.metrics import (
+    samplewise_l2_errors,
+    symmetric_field_discrepancy,
+)
 from pol.learning.observations import observe_equispaced_periodic
 from pol.math.fourier import real_fourier_analysis, real_fourier_synthesis
 from pol.math.periodic import periodic_grid, spectral_resample_periodic
@@ -31,7 +46,37 @@ from pol.runtime.device import (
 )
 from pol.runtime.hashing import stable_object_hash, tensor_sha256
 from pol.runtime.io import atomic_torch_save, write_csv, write_strict_json
+from pol.systems.heat import solve_heat_exact
+from pol.systems.reaction_diffusion import solve_reaction_diffusion
 from pol.systems.registry import evolve
+from .conditions import (
+    CONVERGENCE_CSV_SCHEMA_VERSION,
+    CONVERGENCE_ROW_FIELDS,
+    CONVERGENCE_ROW_SCHEMA_VERSION,
+    CROSS_SOLVER_CHECK_SCHEMA_VERSION,
+    CROSS_SOLVER_METRIC_DEFINITION,
+    burgers_refinement_proof,
+    canonical_invariant_parameters,
+    canonical_numerical_condition,
+    cross_solver_discrepancy_evidence_hash,
+    make_convergence_row,
+    reaction_diffusion_refinement_proof,
+    reference_refinement_proof,
+    validate_cross_solver_validation_block,
+    validate_target_reference_contract,
+)
+from .model1_consistency import (
+    MODEL1_CONSISTENCY_CHECK_SCHEMA_VERSION,
+    model1_foundation_summary,
+    run_matched_model1_pipeline_check,
+    validate_matched_model1_pipeline_check,
+)
+from .quadrature import (
+    FIELD_QUADRATURE_CHECK_SCHEMA_VERSION,
+    field_quadrature_foundation_summary,
+    run_field_quadrature_check,
+    validate_field_quadrature_check,
+)
 
 
 @dataclass(frozen=True)
@@ -40,13 +85,64 @@ class ValidationOutcome:
     certificate: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _TimeSequenceResult:
+    refinement_proof: dict[str, Any]
+    conditions: list[dict[str, Any]]
+    solutions: list[torch.Tensor]
+    runtime_metadata: list[dict[str, Any]]
+    rows: list[dict[str, Any]]
+    selected_index: int | None
+
+
+class _ValidationSolveFailure(RuntimeError):
+    def __init__(self, diagnostic: dict[str, Any]) -> None:
+        super().__init__(str(diagnostic.get("message", "validation solve failed")))
+        self.diagnostic = diagnostic
+
+
+def _calibration_provenance(
+    spec: ValidationSpec,
+    *,
+    sample_ids: torch.Tensor | None = None,
+) -> dict[str, object]:
+    samples = spec.samples
+    split = build_data_split(
+        total_samples=int(samples.total_samples),
+        n_train=int(samples.n_train),
+        n_validation=int(samples.n_validation),
+        n_test=int(samples.n_test),
+        seed=int(samples.seed),
+    )
+    if sample_ids is None:
+        sample_ids = torch.arange(split.total_samples, dtype=torch.long)
+    return calibration_split_provenance(
+        split,
+        spec.target_reference.calibration_sample_ids,
+        sample_ids=sample_ids,
+    )
+
+
 def _scientific_identity(spec: ValidationSpec) -> dict[str, Any]:
     payload = spec.model_dump(mode="json")
     payload.pop("artifact_root", None)
     return {
-        "schema_version": "pol-validation-identity-v5",
+        "schema_version": "pol-validation-identity-v12",
+        "reference_convergence_csv_schema_version": (
+            CONVERGENCE_CSV_SCHEMA_VERSION
+        ),
+        "cross_solver_check_schema_version": (
+            CROSS_SOLVER_CHECK_SCHEMA_VERSION
+        ),
+        "matched_model1_pipeline_check_schema_version": (
+            MODEL1_CONSISTENCY_CHECK_SCHEMA_VERSION
+        ),
+        "field_quadrature_check_schema_version": (
+            FIELD_QUADRATURE_CHECK_SCHEMA_VERSION
+        ),
         **execution_device_policy(),
         "grf_sampler_semantics": GRF_SAMPLER_SEMANTICS,
+        "calibration_provenance": _calibration_provenance(spec),
         "environment": numerical_environment_fingerprint(),
         "spec": payload,
     }
@@ -57,6 +153,28 @@ def validation_reference(spec: ValidationSpec) -> ArtifactRef:
     return ArtifactStore(spec.artifact_root).reference("validations", identity)
 
 
+def _validate_convergence_csv(
+    path: Path,
+    expected_rows: list[dict[str, Any]],
+) -> None:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+    if reader.fieldnames != list(CONVERGENCE_ROW_FIELDS):
+        raise ValueError("reference convergence CSV schema/header mismatch")
+    expected = [
+        {
+            name: "" if row[name] is None else str(row[name])
+            for name in CONVERGENCE_ROW_FIELDS
+        }
+        for row in expected_rows
+    ]
+    if rows != expected:
+        raise ValueError(
+            "reference convergence CSV rows disagree with certificate evidence"
+        )
+
+
 def load_validation_certificate(path: Path | str) -> dict[str, Any]:
     root = Path(path).resolve()
     manifest = verify_artifact(root)
@@ -65,16 +183,32 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
     certificate = json.loads((root / "certificate.json").read_text(encoding="utf-8"))
     if not isinstance(certificate, dict):
         raise ValueError("validation certificate payload must be an object")
-    if certificate.get("schema_version") != "pol-validation-certificate-v5":
+    if certificate.get("schema_version") != "pol-validation-certificate-v12":
         raise ValueError(
-            "unsupported validation certificate schema; P0-05 requires "
-            "pol-validation-certificate-v5"
+            "unsupported validation certificate schema; Phase 2-05B requires "
+            "pol-validation-certificate-v12"
         )
     identity = manifest.get("identity")
     if not isinstance(identity, dict) or identity.get("schema_version") != (
-        "pol-validation-identity-v5"
+        "pol-validation-identity-v12"
     ):
         raise ValueError("unsupported legacy validation artifact identity")
+    if identity.get("reference_convergence_csv_schema_version") != (
+        CONVERGENCE_CSV_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported reference convergence CSV schema")
+    if identity.get("cross_solver_check_schema_version") != (
+        CROSS_SOLVER_CHECK_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported cross-solver check schema")
+    if identity.get("matched_model1_pipeline_check_schema_version") != (
+        MODEL1_CONSISTENCY_CHECK_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported matched Model 1 pipeline check schema")
+    if identity.get("field_quadrature_check_schema_version") != (
+        FIELD_QUADRATURE_CHECK_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported field quadrature check schema")
     verify_execution_device_policy(
         identity,
         boundary="validation artifact identity",
@@ -108,6 +242,63 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
     if not isinstance(fixed_decoder_check, dict):
         raise ValueError("validation fixed-decoder check is missing")
     _validate_decoder_characterization(fixed_decoder_check)
+    matched_model1_check = checks.get("matched_model1_pipeline")
+    if not isinstance(matched_model1_check, dict):
+        raise ValueError("matched Model 1 pipeline check is missing")
+    validate_matched_model1_pipeline_check(
+        matched_model1_check,
+        domain_length=float(spec.domain.length),
+    )
+    field_quadrature_check = checks.get("field_quadrature")
+    if not isinstance(field_quadrature_check, dict):
+        raise ValueError("field quadrature check is missing")
+    validate_field_quadrature_check(
+        field_quadrature_check,
+        domain_length=float(spec.domain.length),
+    )
+    if isinstance(spec.target_reference, HeatAnalyticReferenceSpec):
+        analytic_check = checks.get("heat_analytic")
+        if not isinstance(analytic_check, dict) or stable_object_hash(
+            analytic_check
+        ) != stable_object_hash(_heat_analytic_checks(spec)):
+            raise ValueError(
+                "validation heat analytic check is missing or inconsistent"
+            )
+    if isinstance(
+        spec.target_reference,
+        ReactionDiffusionConvergenceReferenceSpec,
+    ):
+        characterization = checks.get(
+            "reaction_diffusion_characterization"
+        )
+        if not isinstance(characterization, dict) or stable_object_hash(
+            characterization
+        ) != stable_object_hash(
+            _reaction_diffusion_characterization(spec)
+        ):
+            raise ValueError(
+                "validation reaction-diffusion characterization is missing "
+                "or inconsistent"
+            )
+    cross_enabled = (
+        isinstance(
+            spec.target_reference,
+            BurgersConvergenceReferenceSpec,
+        )
+        and spec.target_reference.cross_solver_validation.enabled
+    )
+    if cross_enabled:
+        cross_check = checks.get("cross_solver_validation")
+        if not isinstance(cross_check, dict):
+            raise ValueError(
+                "enabled cross-solver validation evidence is missing"
+            )
+        validate_cross_solver_validation_block(cross_check)
+        _validate_cross_solver_check_against_spec(spec, cross_check)
+    elif "cross_solver_validation" in checks:
+        raise ValueError(
+            "disabled cross-solver validation must not contain evidence"
+        )
     master = torch.load(
         root / "master_initial_conditions.pt",
         map_location="cpu",
@@ -119,6 +310,17 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
         name="master",
     )
     _validate_master_payload_against_spec(master, spec)
+    expected_calibration = _calibration_provenance(
+        spec,
+        sample_ids=master["sample_ids"],
+    )
+    if stable_object_hash(identity.get("calibration_provenance")) != (
+        stable_object_hash(expected_calibration)
+    ):
+        raise ValueError(
+            "validation identity calibration provenance does not match "
+            "the deterministic split"
+        )
     try:
         expected = _certificate_payload(
             spec,
@@ -131,6 +333,13 @@ def load_validation_certificate(path: Path | str) -> dict[str, Any]:
             "validation checks cannot reconstruct the required certificate contract"
         ) from exc
     _validate_target_reference_contract(expected["target_reference_contract"])
+    expected_rows = expected["target_reference_contract"][
+        "convergence_evidence"
+    ]["rows"]
+    _validate_convergence_csv(
+        root / "reference_convergence.csv",
+        expected_rows,
+    )
     if stable_object_hash(certificate) != stable_object_hash(expected):
         raise ValueError(
             "validation certificate contract is missing, contradictory, or "
@@ -294,7 +503,11 @@ def _finite_interface_checks(spec: ValidationSpec, archive: InitialConditionArch
     )
     dims = spec.full_interface
     L = float(spec.domain.length)
-    ids = torch.tensor(spec.calibration_sample_ids, dtype=torch.long, device=archive.values.device)
+    ids = torch.tensor(
+        spec.target_reference.calibration_sample_ids,
+        dtype=torch.long,
+        device=archive.values.device,
+    )
     reference = archive.values.index_select(0, ids)
     finite = spectral_resample_periodic(reference, dims.n_tar, domain_length=L)
     feature_input = spectral_resample_periodic(finite, dims.n_sur, domain_length=L)
@@ -503,17 +716,615 @@ def _decoder_checks(spec: ValidationSpec) -> dict[str, Any]:
     }
 
 
-def _candidate_evolution(spec: ValidationSpec, candidate: BurgersTimeCandidateSpec) -> dict[str, Any]:
-    base = spec.reference_evolution.model_dump(mode="json")
-    system = dict(base["system"])
-    system.update(
-        {
-            "solver": candidate.solver,
-            "dt": candidate.dt,
-            "fine_dt": candidate.fine_dt,
-            "dealias": candidate.dealias,
-        }
+def _heat_analytic_case(
+    spec: ValidationSpec,
+    *,
+    case_id: str,
+    nx: int,
+    domain_length: float,
+    dtype: torch.dtype,
+    basis: str,
+    modes: tuple[tuple[int, float, float], ...],
+    constant: float,
+) -> dict[str, Any]:
+    target = spec.target_reference
+    if not isinstance(target, HeatAnalyticReferenceSpec):
+        raise TypeError("heat analytic checks require heat_analytic")
+    system = target.reference_evolution.system
+    nu = float(system.nu)
+    time = float(target.reference_evolution.time)
+    x = periodic_grid(nx, domain_length, dtype=dtype, device="cpu")
+    values = torch.full((nx,), constant, dtype=dtype)
+    expected = torch.full((nx,), constant, dtype=dtype)
+    mode_values: list[int] = []
+    multipliers: list[float] = []
+    for mode, cosine_amplitude, sine_amplitude in modes:
+        angular_wavenumber = (
+            2.0 * math.pi * float(mode) / float(domain_length)
+        )
+        phase = angular_wavenumber * x
+        multiplier = math.exp(
+            -nu * angular_wavenumber * angular_wavenumber * time
+        )
+        values = values + (
+            cosine_amplitude * torch.cos(phase)
+            + sine_amplitude * torch.sin(phase)
+        )
+        expected = expected + multiplier * (
+            cosine_amplitude * torch.cos(phase)
+            + sine_amplitude * torch.sin(phase)
+        )
+        mode_values.append(mode)
+        multipliers.append(multiplier)
+    actual = solve_heat_exact(
+        values,
+        nu=nu,
+        time=time,
+        domain_length=domain_length,
     )
+    actual_coefficients = torch.fft.rfft(actual, dim=-1, norm="forward")
+    expected_coefficients = torch.fft.rfft(
+        expected,
+        dim=-1,
+        norm="forward",
+    )
+    max_abs_error = float((actual - expected).abs().max())
+    max_coefficient_abs_error = float(
+        (actual_coefficients - expected_coefficients).abs().max()
+    )
+    if dtype == torch.float32:
+        atol = float(spec.algebraic_tolerances.float32_atol)
+        rtol = float(spec.algebraic_tolerances.float32_rtol)
+    else:
+        atol = float(spec.algebraic_tolerances.float64_atol)
+        rtol = float(spec.algebraic_tolerances.float64_rtol)
+    tolerance = atol + rtol * float(expected.abs().max())
+    value_pass = bool(
+        torch.allclose(actual, expected, atol=atol, rtol=rtol)
+    )
+    coefficient_pass = bool(
+        torch.allclose(
+            actual_coefficients,
+            expected_coefficients,
+            atol=atol,
+            rtol=rtol,
+        )
+    )
+    shape_pass = actual.shape == values.shape
+    dtype_pass = actual.dtype == dtype
+    device_pass = actual.device == torch.device("cpu")
+    finite_pass = bool(torch.isfinite(actual).all())
+    passed = (
+        value_pass
+        and coefficient_pass
+        and shape_pass
+        and dtype_pass
+        and device_pass
+        and finite_pass
+    )
+    return {
+        "case_id": case_id,
+        "basis": basis,
+        "nx": nx,
+        "domain_length": float(domain_length),
+        "dtype": str(dtype).removeprefix("torch."),
+        "mode": (
+            0
+            if not mode_values
+            else mode_values[0]
+            if len(mode_values) == 1
+            else mode_values
+        ),
+        "expected_multiplier": (
+            1.0
+            if not multipliers
+            else multipliers[0]
+            if len(multipliers) == 1
+            else multipliers
+        ),
+        "max_abs_error": max_abs_error,
+        "max_coefficient_abs_error": max_coefficient_abs_error,
+        "tolerance": tolerance,
+        "shape_status": "pass" if shape_pass else "fail",
+        "dtype_status": "pass" if dtype_pass else "fail",
+        "device_status": "pass" if device_pass else "fail",
+        "finite_status": "pass" if finite_pass else "fail",
+        "status": "pass" if passed else "fail",
+    }
+
+
+def _heat_analytic_checks(spec: ValidationSpec) -> dict[str, Any]:
+    cases = [
+        _heat_analytic_case(
+            spec,
+            case_id="constant_odd_float64",
+            nx=15,
+            domain_length=1.0,
+            dtype=torch.float64,
+            basis="constant",
+            modes=(),
+            constant=0.375,
+        ),
+        _heat_analytic_case(
+            spec,
+            case_id="cosine_even_float64",
+            nx=16,
+            domain_length=1.0,
+            dtype=torch.float64,
+            basis="cosine",
+            modes=((3, 0.7, 0.0),),
+            constant=0.0,
+        ),
+        _heat_analytic_case(
+            spec,
+            case_id="sine_odd_nonunit_float64",
+            nx=15,
+            domain_length=2.5,
+            dtype=torch.float64,
+            basis="sine",
+            modes=((2, 0.0, -0.55),),
+            constant=0.0,
+        ),
+        _heat_analytic_case(
+            spec,
+            case_id="multimode_even_nonunit_float64",
+            nx=16,
+            domain_length=1.7,
+            dtype=torch.float64,
+            basis="constant_plus_sine_cosine",
+            modes=((1, 0.7, -0.2), (3, -0.15, 0.4)),
+            constant=0.2,
+        ),
+        _heat_analytic_case(
+            spec,
+            case_id="cosine_odd_nonunit_float32",
+            nx=15,
+            domain_length=2.0,
+            dtype=torch.float32,
+            basis="cosine",
+            modes=((2, 0.4, 0.0),),
+            constant=-0.1,
+        ),
+        _heat_analytic_case(
+            spec,
+            case_id="sine_even_nonunit_float32",
+            nx=16,
+            domain_length=2.2,
+            dtype=torch.float32,
+            basis="sine",
+            modes=((3, 0.0, 0.35),),
+            constant=0.1,
+        ),
+        _heat_analytic_case(
+            spec,
+            case_id="nyquist_cosine_unpaired",
+            nx=16,
+            domain_length=1.3,
+            dtype=torch.float64,
+            basis="nyquist_cosine_unpaired",
+            modes=((8, 0.3, 0.0),),
+            constant=0.25,
+        ),
+    ]
+    return {
+        "status": (
+            "pass"
+            if all(case["status"] == "pass" for case in cases)
+            else "fail"
+        ),
+        "temporal_status": "analytic_exact",
+        "cases": cases,
+    }
+
+
+def _reaction_diffusion_actual(
+    values: torch.Tensor,
+    *,
+    case_id: str,
+    nu: float,
+    alpha: float,
+    beta: float,
+    time: float,
+    dt: float,
+    domain_length: float,
+    nonlinear_filter: str,
+) -> torch.Tensor:
+    try:
+        result = solve_reaction_diffusion(
+            values,
+            nu=nu,
+            alpha=alpha,
+            beta=beta,
+            time=time,
+            dt=dt,
+            domain_length=domain_length,
+            nonlinear_filter=nonlinear_filter,
+        )
+    except FloatingPointError as exc:
+        raise _ValidationSolveFailure(
+            {
+                "status": "fail",
+                "failure_kind": "nonfinite_reaction_diffusion_solve",
+                "stage": "analytic_characterization",
+                "case_id": case_id,
+                "message": str(exc),
+            }
+        ) from exc
+    if not bool(torch.isfinite(result.values).all()):
+        raise _ValidationSolveFailure(
+            {
+                "status": "fail",
+                "failure_kind": "nonfinite_reaction_diffusion_solve",
+                "stage": "analytic_characterization",
+                "case_id": case_id,
+                "message": (
+                    "reaction-diffusion characterization produced NaN/Inf"
+                ),
+            }
+        )
+    return result.values
+
+
+def _reaction_diffusion_constant_case(
+    spec: ValidationSpec,
+    *,
+    case_id: str,
+    value: float,
+    nx: int,
+    domain_length: float,
+    nonlinear_filter: str,
+    steps: int,
+) -> dict[str, Any]:
+    target = spec.target_reference
+    if not isinstance(
+        target,
+        ReactionDiffusionConvergenceReferenceSpec,
+    ):
+        raise TypeError(
+            "reaction-diffusion characterization requires "
+            "reaction_diffusion_convergence"
+        )
+    system = target.reference_evolution.system
+    dt = float(system.dt)
+    alpha = float(system.alpha)
+    beta = float(system.beta)
+    scalar = float(value)
+    for _ in range(steps):
+        scalar = scalar + dt * alpha * scalar - dt * beta * scalar**3
+    initial = torch.full(
+        (2, nx),
+        float(value),
+        dtype=torch.float64,
+        device="cpu",
+    )
+    actual = _reaction_diffusion_actual(
+        initial,
+        case_id=case_id,
+        nu=float(system.nu),
+        alpha=alpha,
+        beta=beta,
+        time=steps * dt,
+        dt=dt,
+        domain_length=domain_length,
+        nonlinear_filter=nonlinear_filter,
+    )
+    expected = torch.full_like(actual, scalar)
+    passed = _allclose(actual, expected, spec)
+    return {
+        "case_id": case_id,
+        "characterization": "independent_scalar_recurrence",
+        "initial_constant": float(value),
+        "expected_final_constant": scalar,
+        "nx": nx,
+        "grid_parity": "even" if nx % 2 == 0 else "odd",
+        "domain_length": float(domain_length),
+        "dt": dt,
+        "step_count": steps,
+        "nonlinear_filter": nonlinear_filter,
+        "max_abs_error": float((actual - expected).abs().max()),
+        "finite_status": "pass",
+        "status": "pass" if passed else "fail",
+    }
+
+
+def _reaction_diffusion_equilibrium_case(
+    spec: ValidationSpec,
+    *,
+    sign: int,
+    nonlinear_filter: str,
+) -> dict[str, Any]:
+    target = spec.target_reference
+    if not isinstance(
+        target,
+        ReactionDiffusionConvergenceReferenceSpec,
+    ):
+        raise TypeError(
+            "reaction-diffusion characterization requires "
+            "reaction_diffusion_convergence"
+        )
+    system = target.reference_evolution.system
+    alpha = float(system.alpha)
+    beta = float(system.beta)
+    case_id = (
+        f"equilibrium_{'positive' if sign > 0 else 'negative'}_"
+        f"{nonlinear_filter}"
+    )
+    if alpha <= 0.0 or beta <= 0.0:
+        return {
+            "case_id": case_id,
+            "characterization": "nonzero_constant_equilibrium",
+            "applicable": False,
+            "reason": "requires alpha > 0 and beta > 0",
+            "status": "not_applicable",
+        }
+    value = float(sign) * math.sqrt(alpha / beta)
+    dt = float(system.dt)
+    nx = 15 if sign > 0 else 16
+    initial = torch.full((1, nx), value, dtype=torch.float64)
+    actual = _reaction_diffusion_actual(
+        initial,
+        case_id=case_id,
+        nu=float(system.nu),
+        alpha=alpha,
+        beta=beta,
+        time=3 * dt,
+        dt=dt,
+        domain_length=2.3,
+        nonlinear_filter=nonlinear_filter,
+    )
+    expected = torch.full_like(actual, value)
+    passed = _allclose(actual, expected, spec)
+    return {
+        "case_id": case_id,
+        "characterization": "nonzero_constant_equilibrium",
+        "applicable": True,
+        "equilibrium": value,
+        "nx": nx,
+        "domain_length": 2.3,
+        "dt": dt,
+        "step_count": 3,
+        "nonlinear_filter": nonlinear_filter,
+        "max_abs_error": float((actual - expected).abs().max()),
+        "finite_status": "pass",
+        "status": "pass" if passed else "fail",
+    }
+
+
+def _reaction_diffusion_linear_mode_case(
+    spec: ValidationSpec,
+    *,
+    case_id: str,
+    nx: int,
+    domain_length: float,
+    mode: int,
+    basis: str,
+    nonlinear_filter: str,
+) -> dict[str, Any]:
+    target = spec.target_reference
+    if not isinstance(
+        target,
+        ReactionDiffusionConvergenceReferenceSpec,
+    ):
+        raise TypeError(
+            "reaction-diffusion characterization requires "
+            "reaction_diffusion_convergence"
+        )
+    system = target.reference_evolution.system
+    dt = float(system.dt)
+    nu = float(system.nu)
+    alpha = float(system.alpha)
+    x = periodic_grid(
+        nx,
+        domain_length,
+        dtype=torch.float64,
+        device="cpu",
+    )
+    angular_wavenumber = 2.0 * math.pi * mode / domain_length
+    if basis == "cosine":
+        initial_one = 0.4 * torch.cos(angular_wavenumber * x)
+    elif basis == "sine":
+        initial_one = -0.35 * torch.sin(angular_wavenumber * x)
+    else:
+        raise ValueError(f"unsupported linear-mode basis: {basis}")
+    initial = initial_one.unsqueeze(0)
+    multiplier = (1.0 + dt * alpha) / (
+        1.0 + dt * nu * angular_wavenumber**2
+    )
+    expected = multiplier * initial
+    actual = _reaction_diffusion_actual(
+        initial,
+        case_id=case_id,
+        nu=nu,
+        alpha=alpha,
+        beta=0.0,
+        time=dt,
+        dt=dt,
+        domain_length=domain_length,
+        nonlinear_filter=nonlinear_filter,
+    )
+    passed = _allclose(actual, expected, spec)
+    return {
+        "case_id": case_id,
+        "characterization": "beta_zero_linear_mode_one_step",
+        "beta": 0.0,
+        "basis": basis,
+        "mode": mode,
+        "physical_angular_wavenumber": angular_wavenumber,
+        "expected_multiplier": multiplier,
+        "nx": nx,
+        "grid_parity": "even" if nx % 2 == 0 else "odd",
+        "domain_length": float(domain_length),
+        "dt": dt,
+        "step_count": 1,
+        "nonlinear_filter": nonlinear_filter,
+        "max_abs_error": float((actual - expected).abs().max()),
+        "finite_status": "pass",
+        "status": "pass" if passed else "fail",
+    }
+
+
+def _reaction_diffusion_characterization(
+    spec: ValidationSpec,
+) -> dict[str, Any]:
+    target = spec.target_reference
+    if not isinstance(
+        target,
+        ReactionDiffusionConvergenceReferenceSpec,
+    ):
+        raise TypeError(
+            "reaction-diffusion characterization requires "
+            "reaction_diffusion_convergence"
+        )
+    system = target.reference_evolution.system
+    dt = float(system.dt)
+    zero_initial = torch.zeros((2, 15), dtype=torch.float64)
+    zero_actual = _reaction_diffusion_actual(
+        zero_initial,
+        case_id="zero_equilibrium",
+        nu=float(system.nu),
+        alpha=float(system.alpha),
+        beta=float(system.beta),
+        time=4 * dt,
+        dt=dt,
+        domain_length=1.9,
+        nonlinear_filter="two_thirds",
+    )
+    zero_exact = bool(torch.equal(zero_actual, zero_initial))
+    zero_case = {
+        "case_id": "zero_equilibrium",
+        "characterization": "zero_equilibrium",
+        "nx": 15,
+        "domain_length": 1.9,
+        "dt": dt,
+        "step_count": 4,
+        "nonlinear_filter": "two_thirds",
+        "exact_zero": zero_exact,
+        "max_abs_error": float(zero_actual.abs().max()),
+        "finite_status": "pass",
+        "status": "pass" if zero_exact else "fail",
+    }
+    constant_cases = [
+        _reaction_diffusion_constant_case(
+            spec,
+            case_id="positive_odd_none",
+            value=0.25,
+            nx=15,
+            domain_length=2.5,
+            nonlinear_filter="none",
+            steps=4,
+        ),
+        _reaction_diffusion_constant_case(
+            spec,
+            case_id="negative_even_two_thirds",
+            value=-0.4,
+            nx=16,
+            domain_length=1.7,
+            nonlinear_filter="two_thirds",
+            steps=5,
+        ),
+    ]
+    equilibrium_cases = [
+        _reaction_diffusion_equilibrium_case(
+            spec,
+            sign=1,
+            nonlinear_filter="none",
+        ),
+        _reaction_diffusion_equilibrium_case(
+            spec,
+            sign=-1,
+            nonlinear_filter="two_thirds",
+        ),
+    ]
+    linear_mode_cases = [
+        _reaction_diffusion_linear_mode_case(
+            spec,
+            case_id="linear_cosine_odd_nonunit_none",
+            nx=15,
+            domain_length=2.5,
+            mode=2,
+            basis="cosine",
+            nonlinear_filter="none",
+        ),
+        _reaction_diffusion_linear_mode_case(
+            spec,
+            case_id="linear_sine_even_nonunit_two_thirds",
+            nx=16,
+            domain_length=1.7,
+            mode=3,
+            basis="sine",
+            nonlinear_filter="two_thirds",
+        ),
+    ]
+    required_statuses = [
+        zero_case["status"],
+        *(case["status"] for case in constant_cases),
+        *(
+            case["status"]
+            for case in equilibrium_cases
+            if case["status"] != "not_applicable"
+        ),
+        *(case["status"] for case in linear_mode_cases),
+    ]
+    return {
+        "schema_version": (
+            "pol-reaction-diffusion-characterization-v1"
+        ),
+        "expected_value_construction": (
+            "independent_scalar_and_fourier_mode_algebra"
+        ),
+        "status": (
+            "pass"
+            if all(value == "pass" for value in required_statuses)
+            else "fail"
+        ),
+        "zero_equilibrium": zero_case,
+        "constant_scalar_recurrence": constant_cases,
+        "nonzero_equilibria": equilibrium_cases,
+        "beta_zero_linear_modes": linear_mode_cases,
+    }
+
+
+TimeCandidateSpec = (
+    BurgersTimeCandidateSpec | ReactionDiffusionTimeCandidateSpec
+)
+
+
+def _candidate_evolution(
+    spec: ValidationSpec,
+    candidate: TimeCandidateSpec,
+) -> dict[str, Any]:
+    target = spec.target_reference
+    if not isinstance(
+        target,
+        (
+            BurgersConvergenceReferenceSpec,
+            ReactionDiffusionConvergenceReferenceSpec,
+        ),
+    ):
+        raise TypeError(
+            "candidate evolution requires a time-refined target reference"
+        )
+    base = target.reference_evolution.model_dump(mode="json")
+    system = dict(base["system"])
+    if isinstance(candidate, BurgersTimeCandidateSpec):
+        system.update(
+            {
+                "solver": candidate.solver,
+                "dt": candidate.dt,
+                "fine_dt": candidate.fine_dt,
+                "dealias": candidate.dealias,
+            }
+        )
+    elif isinstance(candidate, ReactionDiffusionTimeCandidateSpec):
+        system.update(
+            {
+                "solver": candidate.solver,
+                "dt": candidate.dt,
+                "nonlinear_filter": candidate.nonlinear_filter,
+            }
+        )
+    else:
+        raise TypeError(f"unsupported time candidate: {type(candidate).__name__}")
     return {"system": system, "time": base["time"]}
 
 
@@ -545,12 +1356,15 @@ def _pair_metrics(
     }
 
 
-def _passes(metrics: dict[str, float], spec: ValidationSpec) -> bool:
-    tol = spec.reference_tolerances
+def _passes(
+    metrics: dict[str, float],
+    tolerances: ReferenceToleranceSpec,
+) -> bool:
     return (
-        metrics["mean_relative_l2"] <= tol.mean_relative_l2
-        and metrics["max_relative_l2"] <= tol.max_relative_l2
-        and metrics["low_mode_relative_l2"] <= tol.low_mode_relative_l2
+        metrics["mean_relative_l2"] <= tolerances.mean_relative_l2
+        and metrics["max_relative_l2"] <= tolerances.max_relative_l2
+        and metrics["low_mode_relative_l2"]
+        <= tolerances.low_mode_relative_l2
     )
 
 
@@ -563,98 +1377,339 @@ def _coarsest_stable_index(rows: list[dict[str, Any]]) -> int | None:
     return None
 
 
-def _reference_convergence(
+def _target_time_refinement_proof(
+    target: (
+        BurgersConvergenceReferenceSpec
+        | ReactionDiffusionConvergenceReferenceSpec
+    ),
+    candidates: list[TimeCandidateSpec],
+) -> dict[str, Any]:
+    values = [
+        candidate.model_dump(mode="json")
+        for candidate in candidates
+    ]
+    evolution_time = float(target.reference_evolution.time)
+    if isinstance(target, BurgersConvergenceReferenceSpec):
+        return burgers_refinement_proof(
+            values,
+            evolution_time=evolution_time,
+        )
+    return reaction_diffusion_refinement_proof(
+        values,
+        evolution_time=evolution_time,
+    )
+
+
+def _verify_solver_metadata(
+    system_kind: str,
+    metadata: dict[str, Any],
+    condition: dict[str, Any],
+) -> None:
+    if system_kind == "burgers":
+        actual = {
+            name: metadata.get(name)
+            for name in (
+                "solver",
+                "requested_outer_dt",
+                "requested_fine_dt",
+                "outer_step_count",
+                "effective_substep",
+                "substeps_per_outer",
+                "dealias",
+            )
+        }
+    elif system_kind == "reaction_diffusion":
+        actual = {
+            "solver": metadata.get("solver"),
+            "dt": metadata.get("requested_dt"),
+            "nonlinear_filter": metadata.get("nonlinear_filter"),
+        }
+    else:
+        raise ValueError(
+            f"unsupported runtime numerical condition: {system_kind}"
+        )
+    if stable_object_hash(actual) != stable_object_hash(condition):
+        raise ValueError(
+            f"{system_kind} runtime metadata disagrees with the canonical "
+            "numerical condition"
+        )
+
+
+def _checked_evolve(
+    initial: torch.Tensor,
+    evolution: dict[str, Any],
+    *,
+    domain_length: float,
+    stage: str,
+    candidate_index: int,
+    nx: int,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    system = evolution.get("system")
+    system_kind = (
+        str(system.get("kind"))
+        if isinstance(system, dict)
+        else "unknown"
+    )
+    try:
+        solution, metadata = evolve(
+            initial,
+            evolution,
+            domain_length=domain_length,
+        )
+    except FloatingPointError as exc:
+        raise _ValidationSolveFailure(
+            {
+                "status": "fail",
+                "failure_kind": "nonfinite_solver_state",
+                "stage": stage,
+                "system_kind": system_kind,
+                "candidate_index": candidate_index,
+                "nx": nx,
+                "numerical_condition": (
+                    dict(system) if isinstance(system, dict) else system
+                ),
+                "message": str(exc),
+            }
+        ) from exc
+    if not bool(torch.isfinite(solution).all()):
+        raise _ValidationSolveFailure(
+            {
+                "status": "fail",
+                "failure_kind": "nonfinite_solver_state",
+                "stage": stage,
+                "system_kind": system_kind,
+                "candidate_index": candidate_index,
+                "nx": nx,
+                "numerical_condition": (
+                    dict(system) if isinstance(system, dict) else system
+                ),
+                "message": "solver returned a state containing NaN/Inf",
+            }
+        )
+    return solution, metadata
+
+
+def _time_sequence_convergence(
+    spec: ValidationSpec,
+    *,
+    initial: torch.Tensor,
+    candidates: list[TimeCandidateSpec],
+    nx: int,
+    reference_candidate_index: int,
+    tolerances: ReferenceToleranceSpec,
+    boundary: str,
+) -> _TimeSequenceResult:
+    """Solve and score one already-validated fixed-method sequence."""
+    target = spec.target_reference
+    if not isinstance(
+        target,
+        (
+            BurgersConvergenceReferenceSpec,
+            ReactionDiffusionConvergenceReferenceSpec,
+        ),
+    ):
+        raise TypeError(
+            "time convergence requires a time-refined target reference"
+        )
+    proof = _target_time_refinement_proof(
+        target,
+        candidates,
+    )
+    conditions = proof["ordered_candidates"]
+    system_kind = target.reference_evolution.system.kind
+    solutions: list[torch.Tensor] = []
+    metadata_rows: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates):
+        solution, metadata = _checked_evolve(
+            initial,
+            _candidate_evolution(spec, candidate),
+            domain_length=float(spec.domain.length),
+            stage=boundary,
+            candidate_index=index,
+            nx=nx,
+        )
+        require_cpu_tensor(
+            solution,
+            boundary=boundary,
+            name=f"solution_candidate_{index}",
+        )
+        _verify_solver_metadata(
+            system_kind,
+            metadata,
+            conditions[index],
+        )
+        solutions.append(solution)
+        metadata_rows.append(metadata)
+    rows: list[dict[str, Any]] = []
+    for index in range(len(candidates) - 1):
+        metrics = _pair_metrics(
+            solutions[index],
+            solutions[index + 1],
+            q=int(target.q_reference_check),
+            domain_length=float(spec.domain.length),
+        )
+        rows.append(
+            make_convergence_row(
+                check_kind="temporal",
+                candidate_axis="numerical_condition",
+                coarse_candidate_index=index,
+                fine_candidate_index=index + 1,
+                coarse_reference_candidate_index=(
+                    reference_candidate_index
+                ),
+                fine_reference_candidate_index=(
+                    reference_candidate_index
+                ),
+                coarse_nx=nx,
+                fine_nx=nx,
+                coarse_condition_index=index,
+                fine_condition_index=index + 1,
+                coarse_condition=conditions[index],
+                fine_condition=conditions[index + 1],
+                common_nx=nx,
+                metrics=metrics,
+                status=(
+                    "pass"
+                    if _passes(metrics, tolerances)
+                    else "fail"
+                ),
+            )
+        )
+    return _TimeSequenceResult(
+        refinement_proof=proof,
+        conditions=conditions,
+        solutions=solutions,
+        runtime_metadata=metadata_rows,
+        rows=rows,
+        selected_index=_coarsest_stable_index(rows),
+    )
+
+
+def _time_refined_reference_convergence(
     spec: ValidationSpec,
     archive: InitialConditionArchive,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    target = spec.target_reference
+    if not isinstance(
+        target,
+        (
+            BurgersConvergenceReferenceSpec,
+            ReactionDiffusionConvergenceReferenceSpec,
+        ),
+    ):
+        raise TypeError(
+            "time-refined reference convergence requires Burgers or "
+            "reaction-diffusion"
+        )
     require_cpu_tensors(
         archive.__dict__,
         boundary="validation reference-convergence input",
         name="archive",
     )
     L = float(spec.domain.length)
-    ids = torch.tensor(spec.calibration_sample_ids, dtype=torch.long, device=archive.values.device)
+    ids = torch.tensor(
+        target.calibration_sample_ids,
+        dtype=torch.long,
+        device=archive.values.device,
+    )
     initial_master = archive.values.index_select(0, ids)
-    nx_values = [int(value) for value in spec.reference_nx_candidates]
-    candidates = list(spec.time_candidates)
+    nx_values = [int(value) for value in target.reference_nx_candidates]
+    candidates = list(target.time_candidates)
+    refinement_proof = _target_time_refinement_proof(
+        target,
+        candidates,
+    )
+    conditions = refinement_proof["ordered_candidates"]
+    system_kind = target.reference_evolution.system.kind
     finest_candidate = candidates[-1]
+    finest_condition_index = len(conditions) - 1
+    finest_condition = conditions[finest_condition_index]
     spatial_solutions: dict[int, torch.Tensor] = {}
     metadata: dict[str, Any] = {}
-    for nx in nx_values:
+    for reference_index, nx in enumerate(nx_values):
         initial = spectral_resample_periodic(initial_master, nx, domain_length=L)
-        solution, meta = evolve(
+        solution, meta = _checked_evolve(
             initial,
             _candidate_evolution(spec, finest_candidate),
             domain_length=L,
+            stage="spatial_reference_convergence",
+            candidate_index=finest_condition_index,
+            nx=nx,
         )
         require_cpu_tensor(
             solution,
             boundary="validation spatial reference-convergence solve",
             name=f"solution_nx_{nx}",
         )
+        _verify_solver_metadata(system_kind, meta, finest_condition)
         spatial_solutions[nx] = solution
-        metadata[f"spatial_{nx}"] = meta
+        metadata[f"spatial_{reference_index}"] = meta
     rows: list[dict[str, Any]] = []
     spatial_rows: list[dict[str, Any]] = []
-    for coarse_nx, fine_nx in zip(nx_values[:-1], nx_values[1:]):
+    for index, (coarse_nx, fine_nx) in enumerate(
+        zip(nx_values[:-1], nx_values[1:])
+    ):
         metrics = _pair_metrics(
             spatial_solutions[coarse_nx],
             spatial_solutions[fine_nx],
-            q=int(spec.q_reference_check),
+            q=int(target.q_reference_check),
             domain_length=L,
         )
-        row = {
-            "check": "spatial",
-            "coarse": coarse_nx,
-            "fine": fine_nx,
-            **metrics,
-            "status": "pass" if _passes(metrics, spec) else "fail",
-        }
+        row = make_convergence_row(
+            check_kind="spatial",
+            candidate_axis="reference_resolution",
+            coarse_candidate_index=index,
+            fine_candidate_index=index + 1,
+            coarse_reference_candidate_index=index,
+            fine_reference_candidate_index=index + 1,
+            coarse_nx=coarse_nx,
+            fine_nx=fine_nx,
+            coarse_condition_index=finest_condition_index,
+            fine_condition_index=finest_condition_index,
+            coarse_condition=finest_condition,
+            fine_condition=finest_condition,
+            common_nx=coarse_nx,
+            metrics=metrics,
+            status=(
+                "pass"
+                if _passes(metrics, target.reference_tolerances)
+                else "fail"
+            ),
+        )
         spatial_rows.append(row)
         rows.append(row)
     spatial_index = _coarsest_stable_index(spatial_rows)
-    selected_nx = None if spatial_index is None else int(spatial_rows[spatial_index]["coarse"])
+    selected_nx = (
+        None if spatial_index is None else nx_values[spatial_index]
+    )
 
     finest_nx = nx_values[-1]
-    initial_finest = spectral_resample_periodic(initial_master, finest_nx, domain_length=L)
-    temporal_solutions: list[torch.Tensor] = []
-    temporal_metadata: list[dict[str, Any]] = []
-    for candidate in candidates:
-        solution, meta = evolve(
-            initial_finest,
-            _candidate_evolution(spec, candidate),
-            domain_length=L,
+    finest_reference_index = len(nx_values) - 1
+    initial_finest = spectral_resample_periodic(
+        initial_master,
+        finest_nx,
+        domain_length=L,
+    )
+    temporal = _time_sequence_convergence(
+        spec,
+        initial=initial_finest,
+        candidates=candidates,
+        nx=finest_nx,
+        reference_candidate_index=finest_reference_index,
+        tolerances=target.reference_tolerances,
+        boundary="validation temporal reference-convergence solve",
+    )
+    if stable_object_hash(temporal.conditions) != stable_object_hash(
+        conditions
+    ):
+        raise ValueError(
+            "primary time convergence conditions changed during reuse"
         )
-        require_cpu_tensor(
-            solution,
-            boundary="validation temporal reference-convergence solve",
-            name=f"solution_candidate_{len(temporal_solutions)}",
-        )
-        temporal_solutions.append(solution)
-        temporal_metadata.append(meta)
-    temporal_rows: list[dict[str, Any]] = []
-    for index in range(len(candidates) - 1):
-        metrics = _pair_metrics(
-            temporal_solutions[index],
-            temporal_solutions[index + 1],
-            q=int(spec.q_reference_check),
-            domain_length=L,
-        )
-        row = {
-            "check": "temporal",
-            "coarse": index,
-            "fine": index + 1,
-            "coarse_dt": candidates[index].dt,
-            "coarse_fine_dt": candidates[index].fine_dt,
-            "fine_dt": candidates[index + 1].dt,
-            "fine_fine_dt": candidates[index + 1].fine_dt,
-            **metrics,
-            "status": "pass" if _passes(metrics, spec) else "fail",
-        }
-        temporal_rows.append(row)
-        rows.append(row)
-    temporal_index = _coarsest_stable_index(temporal_rows)
-    selected_time_index = temporal_index
+    temporal_solutions = temporal.solutions
+    temporal_metadata = temporal.runtime_metadata
+    temporal_rows = temporal.rows
+    rows.extend(temporal_rows)
+    selected_time_index = temporal.selected_index
 
     joint_status = "fail"
     joint_row: dict[str, Any] | None = None
@@ -662,31 +1717,52 @@ def _reference_convergence(
         selected_initial = spectral_resample_periodic(
             initial_master, selected_nx, domain_length=L
         )
-        selected_solution, selected_meta = evolve(
+        selected_solution, selected_meta = _checked_evolve(
             selected_initial,
             _candidate_evolution(spec, candidates[selected_time_index]),
             domain_length=L,
+            stage="joint_reference_convergence",
+            candidate_index=selected_time_index,
+            nx=selected_nx,
         )
         require_cpu_tensor(
             selected_solution,
             boundary="validation joint reference-convergence solve",
             name="selected_solution",
         )
+        _verify_solver_metadata(
+            system_kind,
+            selected_meta,
+            conditions[selected_time_index],
+        )
         joint_metrics = _pair_metrics(
             selected_solution,
             temporal_solutions[-1],
-            q=int(spec.q_reference_check),
+            q=int(target.q_reference_check),
             domain_length=L,
         )
-        joint_status = "pass" if _passes(joint_metrics, spec) else "fail"
-        joint_row = {
-            "check": "joint",
-            "coarse": selected_nx,
-            "fine": finest_nx,
-            "time_candidate": selected_time_index,
-            **joint_metrics,
-            "status": joint_status,
-        }
+        joint_status = (
+            "pass"
+            if _passes(joint_metrics, target.reference_tolerances)
+            else "fail"
+        )
+        joint_row = make_convergence_row(
+            check_kind="joint",
+            candidate_axis="coupled",
+            coarse_candidate_index=selected_time_index,
+            fine_candidate_index=finest_condition_index,
+            coarse_reference_candidate_index=spatial_index,
+            fine_reference_candidate_index=finest_reference_index,
+            coarse_nx=selected_nx,
+            fine_nx=finest_nx,
+            coarse_condition_index=selected_time_index,
+            fine_condition_index=finest_condition_index,
+            coarse_condition=conditions[selected_time_index],
+            fine_condition=finest_condition,
+            common_nx=selected_nx,
+            metrics=joint_metrics,
+            status=joint_status,
+        )
         rows.append(joint_row)
         metadata["joint_selected"] = selected_meta
 
@@ -705,17 +1781,459 @@ def _reference_convergence(
         "selected_time_candidate": (
             None
             if selected_time_index is None
-            else candidates[selected_time_index].model_dump(mode="json")
+            else conditions[selected_time_index]
         ),
         "finest_reference_nx": finest_nx,
-        "finest_time_candidate": candidates[-1].model_dump(mode="json"),
+        "finest_time_candidate": finest_condition,
+        "candidate_refinement_proof": refinement_proof,
         "solver_metadata": {
             **metadata,
             "temporal": temporal_metadata,
         },
         "joint_row": joint_row,
+        "rows": rows,
     }
     return result, rows
+
+
+def _cross_solver_self_evidence(
+    result: _TimeSequenceResult,
+) -> dict[str, Any]:
+    finest_index = len(result.conditions) - 1
+    selected_index = result.selected_index
+    return {
+        "status": "pass" if selected_index is not None else "fail",
+        "ordered_candidates": result.conditions,
+        "candidate_refinement_proof": result.refinement_proof,
+        "rows": result.rows,
+        "rows_hash": stable_object_hash(result.rows),
+        "pairwise_row_hashes": [
+            row["row_hash"] for row in result.rows
+        ],
+        "selected_candidate_index": selected_index,
+        "selected_condition": (
+            None
+            if selected_index is None
+            else result.conditions[selected_index]
+        ),
+        "finest_candidate_index": finest_index,
+        "finest_condition": result.conditions[finest_index],
+        "runtime_solver_metadata": result.runtime_metadata,
+    }
+
+
+def _validate_cross_solver_check_against_spec(
+    spec: ValidationSpec,
+    block: dict[str, Any],
+) -> None:
+    target = spec.target_reference
+    if not isinstance(target, BurgersConvergenceReferenceSpec):
+        raise ValueError("cross-solver evidence requires a Burgers spec")
+    diagnostic = target.cross_solver_validation
+    if not isinstance(
+        diagnostic,
+        EnabledBurgersCrossSolverValidationSpec,
+    ):
+        raise ValueError("cross-solver evidence is disabled in the spec")
+    system = target.reference_evolution.system
+    expected_context = {
+        "system_kind": "burgers",
+        "invariant_parameters": canonical_invariant_parameters(
+            "burgers",
+            system.model_dump(mode="json"),
+        ),
+        "evolution_time": float(target.reference_evolution.time),
+        "domain_length": float(spec.domain.length),
+        "dtype": spec.samples.dtype,
+        "dealias": diagnostic.context.dealias,
+        "common_nx": int(target.reference_nx_candidates[-1]),
+        "reference_candidate_index": (
+            len(target.reference_nx_candidates) - 1
+        ),
+        "sample_ids": [
+            int(value) for value in target.calibration_sample_ids
+        ],
+    }
+    if stable_object_hash(block.get("context")) != stable_object_hash(
+        expected_context
+    ):
+        raise ValueError(
+            "cross-solver validation context disagrees with the resolved spec"
+        )
+    if stable_object_hash(block.get("tolerances")) != stable_object_hash(
+        diagnostic.tolerances.model_dump(mode="json")
+    ):
+        raise ValueError(
+            "cross-solver tolerances disagree with the resolved spec"
+        )
+    self_convergence = block.get("self_convergence")
+    if not isinstance(self_convergence, dict):
+        raise ValueError("cross-solver self-convergence evidence is missing")
+    for family in ("split_step", "etdrk4"):
+        expected_proof = burgers_refinement_proof(
+            [
+                candidate.model_dump(mode="json")
+                for candidate in getattr(
+                    diagnostic.solvers,
+                    family,
+                ).candidates
+            ],
+            evolution_time=float(target.reference_evolution.time),
+        )
+        evidence = self_convergence.get(family)
+        if (
+            not isinstance(evidence, dict)
+            or stable_object_hash(evidence.get("ordered_candidates"))
+            != stable_object_hash(expected_proof["ordered_candidates"])
+            or stable_object_hash(
+                evidence.get("candidate_refinement_proof")
+            )
+            != stable_object_hash(expected_proof)
+        ):
+            raise ValueError(
+                f"cross-solver {family} candidates disagree with the "
+                "resolved spec"
+            )
+
+
+def _burgers_cross_solver_validation(
+    spec: ValidationSpec,
+    archive: InitialConditionArchive,
+) -> dict[str, Any]:
+    """Build supporting, symmetric split-step/ETDRK4 evidence."""
+    target = spec.target_reference
+    if not isinstance(target, BurgersConvergenceReferenceSpec):
+        raise TypeError("cross-solver validation requires burgers_convergence")
+    diagnostic = target.cross_solver_validation
+    if not isinstance(
+        diagnostic,
+        EnabledBurgersCrossSolverValidationSpec,
+    ):
+        raise TypeError("cross-solver validation is not enabled")
+    require_cpu_tensors(
+        archive.__dict__,
+        boundary="cross-solver validation input",
+        name="archive",
+    )
+    domain_length = float(spec.domain.length)
+    sample_ids = [
+        int(value) for value in target.calibration_sample_ids
+    ]
+    ids = torch.tensor(
+        sample_ids,
+        dtype=torch.long,
+        device=archive.values.device,
+    )
+    finest_nx = int(target.reference_nx_candidates[-1])
+    reference_index = len(target.reference_nx_candidates) - 1
+    initial_master = archive.values.index_select(0, ids)
+    initial_finest = spectral_resample_periodic(
+        initial_master,
+        finest_nx,
+        domain_length=domain_length,
+    )
+
+    sequence_results: dict[str, _TimeSequenceResult] = {}
+    for family in ("split_step", "etdrk4"):
+        family_spec = getattr(diagnostic.solvers, family)
+        sequence_results[family] = _time_sequence_convergence(
+            spec,
+            initial=initial_finest,
+            candidates=list(family_spec.candidates),
+            nx=finest_nx,
+            reference_candidate_index=reference_index,
+            tolerances=diagnostic.tolerances,
+            boundary=f"cross-solver {family} self-convergence solve",
+        )
+    self_convergence = {
+        family: _cross_solver_self_evidence(sequence_results[family])
+        for family in ("split_step", "etdrk4")
+    }
+    finest_conditions = {
+        family: sequence_results[family].conditions[-1]
+        for family in ("split_step", "etdrk4")
+    }
+    self_pass = all(
+        evidence["status"] == "pass"
+        for evidence in self_convergence.values()
+    )
+    if self_pass:
+        discrepancy_metrics = symmetric_field_discrepancy(
+            sequence_results["split_step"].solutions[-1],
+            sequence_results["etdrk4"].solutions[-1],
+            q=int(target.q_reference_check),
+            domain_length=domain_length,
+        )
+        discrepancy_status = (
+            "pass"
+            if _passes(discrepancy_metrics, diagnostic.tolerances)
+            else "fail"
+        )
+        not_evaluated_reason = None
+    else:
+        discrepancy_metrics = None
+        discrepancy_status = "not_evaluated"
+        not_evaluated_reason = (
+            "self_convergence_must_pass_before_cross_comparison"
+        )
+    system = target.reference_evolution.system
+    context = {
+        "system_kind": "burgers",
+        "invariant_parameters": canonical_invariant_parameters(
+            "burgers",
+            system.model_dump(mode="json"),
+        ),
+        "evolution_time": float(target.reference_evolution.time),
+        "domain_length": domain_length,
+        "dtype": spec.samples.dtype,
+        "dealias": diagnostic.context.dealias,
+        "common_nx": finest_nx,
+        "reference_candidate_index": reference_index,
+        "sample_ids": sample_ids,
+    }
+    block = {
+        "schema_version": CROSS_SOLVER_CHECK_SCHEMA_VERSION,
+        "enabled": True,
+        "status": (
+            "pass"
+            if self_pass and discrepancy_status == "pass"
+            else "fail"
+        ),
+        "role": "supporting_evidence_not_primary_allowed_refinement",
+        "context": context,
+        "tolerances": diagnostic.tolerances.model_dump(mode="json"),
+        "self_convergence": self_convergence,
+        "finest_conditions": finest_conditions,
+        "discrepancy_definition": CROSS_SOLVER_METRIC_DEFINITION,
+        "discrepancy_metrics": discrepancy_metrics,
+        "discrepancy_status": discrepancy_status,
+        "discrepancy_not_evaluated_reason": not_evaluated_reason,
+        "discrepancy_evidence_hash": (
+            cross_solver_discrepancy_evidence_hash(
+                finest_conditions=finest_conditions,
+                common_nx=finest_nx,
+                sample_ids=sample_ids,
+                metrics=discrepancy_metrics,
+                not_evaluated_reason=not_evaluated_reason,
+            )
+        ),
+    }
+    validate_cross_solver_validation_block(block)
+    _validate_cross_solver_check_against_spec(spec, block)
+    return block
+
+
+def _heat_pair_metrics(
+    coarse: torch.Tensor,
+    fine: torch.Tensor,
+    *,
+    q: int,
+    domain_length: float,
+) -> dict[str, float]:
+    coarse_common = spectral_resample_periodic(
+        coarse,
+        int(fine.shape[-1]),
+        domain_length=domain_length,
+    )
+    _, relative = samplewise_l2_errors(
+        coarse_common,
+        fine,
+        domain_length=domain_length,
+    )
+    coarse_coeff = real_fourier_analysis(
+        coarse_common,
+        q,
+        domain_length=domain_length,
+    )
+    fine_coeff = real_fourier_analysis(
+        fine,
+        q,
+        domain_length=domain_length,
+    )
+    denominator = torch.linalg.vector_norm(fine_coeff, dim=-1).clamp_min(
+        torch.finfo(fine_coeff.dtype).eps
+    )
+    low_relative = torch.linalg.vector_norm(
+        coarse_coeff - fine_coeff,
+        dim=-1,
+    ) / denominator
+    return {
+        "mean_relative_l2": float(relative.mean()),
+        "max_relative_l2": float(relative.max()),
+        "low_mode_relative_l2": float(low_relative.mean()),
+    }
+
+
+def _heat_reference_convergence(
+    spec: ValidationSpec,
+    archive: InitialConditionArchive,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    target = spec.target_reference
+    if not isinstance(target, HeatAnalyticReferenceSpec):
+        raise TypeError("heat reference convergence requires heat_analytic")
+    require_cpu_tensors(
+        archive.__dict__,
+        boundary="validation heat reference-convergence input",
+        name="archive",
+    )
+    L = float(spec.domain.length)
+    ids = torch.tensor(
+        target.calibration_sample_ids,
+        dtype=torch.long,
+        device=archive.values.device,
+    )
+    initial_master = archive.values.index_select(0, ids)
+    nx_values = [int(value) for value in target.reference_nx_candidates]
+    evolution = target.reference_evolution.model_dump(mode="json")
+    condition = canonical_numerical_condition(
+        "heat",
+        target.reference_evolution.system.model_dump(mode="json"),
+    )
+    solutions: dict[int, torch.Tensor] = {}
+    metadata: dict[str, Any] = {}
+    for nx in nx_values:
+        initial = spectral_resample_periodic(
+            initial_master,
+            nx,
+            domain_length=L,
+        )
+        solution, solver_metadata = _checked_evolve(
+            initial,
+            evolution,
+            domain_length=L,
+            stage="heat_spatial_reference_convergence",
+            candidate_index=0,
+            nx=nx,
+        )
+        require_cpu_tensor(
+            solution,
+            boundary="validation heat spatial reference-convergence solve",
+            name=f"solution_nx_{nx}",
+        )
+        solutions[nx] = solution
+        metadata[f"spatial_{nx}"] = solver_metadata
+
+    rows: list[dict[str, Any]] = []
+    spatial_rows: list[dict[str, Any]] = []
+    for index, (coarse_nx, fine_nx) in enumerate(
+        zip(nx_values[:-1], nx_values[1:])
+    ):
+        metrics = _heat_pair_metrics(
+            solutions[coarse_nx],
+            solutions[fine_nx],
+            q=int(target.q_reference_check),
+            domain_length=L,
+        )
+        row = make_convergence_row(
+            check_kind="spatial",
+            candidate_axis="reference_resolution",
+            coarse_candidate_index=index,
+            fine_candidate_index=index + 1,
+            coarse_reference_candidate_index=index,
+            fine_reference_candidate_index=index + 1,
+            coarse_nx=coarse_nx,
+            fine_nx=fine_nx,
+            coarse_condition_index=0,
+            fine_condition_index=0,
+            coarse_condition=condition,
+            fine_condition=condition,
+            common_nx=fine_nx,
+            metrics=metrics,
+            status=(
+                "pass"
+                if _passes(
+                    metrics,
+                    target.reference_tolerances,
+                )
+                else "fail"
+            ),
+        )
+        spatial_rows.append(row)
+        rows.append(row)
+    spatial_index = _coarsest_stable_index(spatial_rows)
+    selected_nx = (
+        None if spatial_index is None else nx_values[spatial_index]
+    )
+    finest_nx = nx_values[-1]
+    finest_reference_index = len(nx_values) - 1
+    joint_row: dict[str, Any] | None = None
+    joint_status = "fail"
+    if selected_nx is not None:
+        joint_metrics = _heat_pair_metrics(
+            solutions[selected_nx],
+            solutions[finest_nx],
+            q=int(target.q_reference_check),
+            domain_length=L,
+        )
+        joint_status = (
+            "pass"
+            if _passes(
+                joint_metrics,
+                target.reference_tolerances,
+            )
+            else "fail"
+        )
+        joint_row = make_convergence_row(
+            check_kind="joint",
+            candidate_axis="coupled",
+            coarse_candidate_index=spatial_index,
+            fine_candidate_index=finest_reference_index,
+            coarse_reference_candidate_index=spatial_index,
+            fine_reference_candidate_index=finest_reference_index,
+            coarse_nx=selected_nx,
+            fine_nx=finest_nx,
+            coarse_condition_index=0,
+            fine_condition_index=0,
+            coarse_condition=condition,
+            fine_condition=condition,
+            common_nx=finest_nx,
+            metrics=joint_metrics,
+            status=joint_status,
+        )
+        rows.append(joint_row)
+    return (
+        {
+            "status": (
+                "pass"
+                if selected_nx is not None and joint_status == "pass"
+                else "fail"
+            ),
+            "spatial_status": (
+                "pass" if selected_nx is not None else "fail"
+            ),
+            "temporal_status": "analytic_exact",
+            "joint_status": joint_status,
+            "selected_reference_nx": selected_nx,
+            "selected_reference_candidate_index": spatial_index,
+            "selected_numerical_condition": condition,
+            "selected_numerical_condition_index": 0,
+            "finest_reference_nx": finest_nx,
+            "solver_metadata": metadata,
+            "joint_row": joint_row,
+            "rows": rows,
+        },
+        rows,
+    )
+
+
+def _reference_convergence(
+    spec: ValidationSpec,
+    archive: InitialConditionArchive,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    target = spec.target_reference
+    if isinstance(
+        target,
+        (
+            BurgersConvergenceReferenceSpec,
+            ReactionDiffusionConvergenceReferenceSpec,
+        ),
+    ):
+        return _time_refined_reference_convergence(spec, archive)
+    if isinstance(target, HeatAnalyticReferenceSpec):
+        return _heat_reference_convergence(spec, archive)
+    raise TypeError(
+        f"unsupported target-reference validation: {type(target).__name__}"
+    )
 
 
 def _master_payload(archive: InitialConditionArchive) -> dict[str, Any]:
@@ -761,7 +2279,10 @@ def _validate_master_payload_against_spec(
     if not all(isinstance(value, torch.Tensor) for value in (sample_ids, values, fourier)):
         raise ValueError("initial-condition archive tensors are missing")
     total = int(spec.samples.total_samples)
-    nx = max(int(value) for value in spec.reference_nx_candidates)
+    nx = max(
+        int(value)
+        for value in spec.target_reference.reference_nx_candidates
+    )
     if sample_ids.shape != (total,) or sample_ids.dtype != torch.long:
         raise ValueError("initial-condition archive sample_ids are inconsistent")
     if not torch.equal(sample_ids, torch.arange(total, dtype=torch.long)):
@@ -843,6 +2364,8 @@ def _foundation_contract(
         "real_fourier_projector",
         "finite_input_interface",
         "fixed_decoder",
+        "matched_model1_pipeline",
+        "field_quadrature",
     )
     statuses = {
         name: checks[name]["status"]
@@ -850,7 +2373,7 @@ def _foundation_contract(
     }
     samples = spec.samples
     return {
-        "schema_version": "pol-validation-foundation-contract-v4",
+        "schema_version": "pol-validation-foundation-contract-v8",
         **execution_device_policy(),
         "domain_length": float(spec.domain.length),
         "grf_sampler_domain_length": float(
@@ -868,6 +2391,10 @@ def _foundation_contract(
             "preprocessing": samples.preprocessing,
         },
         "initial_condition": samples.initial_condition.model_dump(mode="json"),
+        "calibration_provenance": _calibration_provenance(
+            spec,
+            sample_ids=master_payload["sample_ids"],
+        ),
         "master_initial_conditions": _master_archive_binding(master_payload),
         "general_foundation_checks": {
             "status": (
@@ -880,6 +2407,12 @@ def _foundation_contract(
         "fixed_decoder_bandwidth_contract": checks["fixed_decoder"][
             "zero_fill_characterization"
         ],
+        "matched_model1_pipeline_contract": model1_foundation_summary(
+            checks["matched_model1_pipeline"]
+        ),
+        "field_quadrature_contract": field_quadrature_foundation_summary(
+            checks["field_quadrature"]
+        ),
     }
 
 
@@ -887,112 +2420,156 @@ def _target_reference_contract(
     spec: ValidationSpec,
     convergence: dict[str, Any],
 ) -> dict[str, Any]:
-    nx_candidates = [int(value) for value in spec.reference_nx_candidates]
-    time_candidates = [
-        candidate.model_dump(mode="json") for candidate in spec.time_candidates
+    target = spec.target_reference
+    nx_candidates = [
+        int(value) for value in target.reference_nx_candidates
     ]
     reference_index = convergence.get("selected_reference_candidate_index")
-    time_index = convergence.get("selected_time_candidate_index")
     reference_allowed_indices = (
         []
         if not isinstance(reference_index, int)
         else list(range(reference_index, len(nx_candidates)))
     )
-    time_allowed_indices = (
+    system = target.reference_evolution.system
+    system_values = system.model_dump(mode="json")
+    evolution_time = float(target.reference_evolution.time)
+    if isinstance(
+        target,
+        (
+            BurgersConvergenceReferenceSpec,
+            ReactionDiffusionConvergenceReferenceSpec,
+        ),
+    ):
+        refinement_proof = _target_time_refinement_proof(
+            target,
+            list(target.time_candidates),
+        )
+        conditions = refinement_proof["ordered_candidates"]
+        condition_index = convergence.get("selected_time_candidate_index")
+        method_kind = "candidate_refinement"
+        temporal_status = (
+            "converged"
+            if convergence.get("temporal_status") == "pass"
+            else "failed"
+        )
+    elif isinstance(target, HeatAnalyticReferenceSpec):
+        conditions = [
+            canonical_numerical_condition("heat", system_values)
+        ]
+        refinement_proof = None
+        condition_index = convergence.get(
+            "selected_numerical_condition_index"
+        )
+        method_kind = "analytic_exact"
+        temporal_status = "analytic_exact"
+    else:
+        raise TypeError(
+            f"unsupported target-reference spec: {type(target).__name__}"
+        )
+    condition_allowed_indices = (
         []
-        if not isinstance(time_index, int)
-        else list(range(time_index, len(time_candidates)))
+        if not isinstance(condition_index, int)
+        else list(range(condition_index, len(conditions)))
     )
-    system = spec.reference_evolution.system
-    return {
-        "schema_version": "pol-target-reference-contract-v1",
+    finest_reference_index = len(nx_candidates) - 1
+    finest_condition_index = len(conditions) - 1
+    convergence_rows = convergence.get("rows")
+    if not isinstance(convergence_rows, list):
+        raise ValueError("reference convergence did not return canonical rows")
+    pairwise_row_hashes = [
+        row["row_hash"]
+        for row in convergence_rows
+        if row.get("check_kind") in {"spatial", "temporal"}
+    ]
+    joint_rows = [
+        row
+        for row in convergence_rows
+        if row.get("check_kind") == "joint"
+    ]
+    contract = {
+        "schema_version": "pol-target-reference-contract-v4",
         "system_kind": system.kind,
-        "invariant_parameters": {
-            "nu": float(system.nu),
-            "advection_coefficient": float(system.advection_coefficient),
-        },
-        "evolution_time": float(spec.reference_evolution.time),
+        "invariant_parameters": canonical_invariant_parameters(
+            system.kind,
+            system_values,
+        ),
+        "evolution_time": evolution_time,
         "dtype": spec.samples.dtype,
         "domain_length": float(spec.domain.length),
         "reference_resolution": {
             "selected_value": convergence.get("selected_reference_nx"),
             "selected_candidate_index": reference_index,
+            "finest_value": nx_candidates[finest_reference_index],
+            "finest_candidate_index": finest_reference_index,
             "candidates": nx_candidates,
+            "candidate_refinement_proof": reference_refinement_proof(
+                nx_candidates
+            ),
         },
-        "time_discretization": {
-            "selected_candidate": convergence.get("selected_time_candidate"),
-            "selected_candidate_index": time_index,
-            "candidates": time_candidates,
+        "numerical_method_validation": {
+            "kind": method_kind,
+            "selected_condition": (
+                None
+                if not isinstance(condition_index, int)
+                else conditions[condition_index]
+            ),
+            "selected_candidate_index": condition_index,
+            "finest_condition": conditions[finest_condition_index],
+            "finest_candidate_index": finest_condition_index,
+            "candidates": conditions,
+            "candidate_refinement_proof": refinement_proof,
+            "temporal_status": temporal_status,
         },
-        "selection_policy": spec.selection_policy,
+        "convergence_evidence": {
+            "schema_version": CONVERGENCE_CSV_SCHEMA_VERSION,
+            "row_schema_version": CONVERGENCE_ROW_SCHEMA_VERSION,
+            "row_semantics": (
+                "adjacent_candidate_pairs_plus_selected_vs_finest"
+            ),
+            "blank_field_semantics": {
+                "requested_fine_dt": (
+                    "null/blank exactly for ETDRK4, reaction-diffusion, "
+                    "and analytic heat conditions"
+                ),
+                "burgers_step_metadata": (
+                    "null/blank for analytic heat and reaction-diffusion "
+                    "conditions"
+                ),
+                "reaction_diffusion_method_fields": (
+                    "null/blank for analytic heat and Burgers conditions"
+                ),
+            },
+            "tolerances": target.reference_tolerances.model_dump(
+                mode="json"
+            ),
+            "rows": convergence_rows,
+            "rows_hash": stable_object_hash(convergence_rows),
+            "pairwise_row_hashes": pairwise_row_hashes,
+            "joint_row_hash": (
+                None if not joint_rows else joint_rows[0]["row_hash"]
+            ),
+            "observed_order_diagnostics": [],
+        },
+        "selection_policy": target.selection_policy,
         "allowed_refinement_relation": {
             "kind": "validated_candidate_suffix_exact_membership",
             "reference_nx_allowed_indices": reference_allowed_indices,
             "reference_nx_allowed_values": [
                 nx_candidates[index] for index in reference_allowed_indices
             ],
-            "time_candidate_allowed_indices": time_allowed_indices,
-            "time_candidate_allowed_values": [
-                time_candidates[index] for index in time_allowed_indices
+            "numerical_condition_allowed_indices": (
+                condition_allowed_indices
+            ),
+            "numerical_condition_allowed_values": [
+                conditions[index] for index in condition_allowed_indices
             ],
         },
     }
+    return contract
 
 
 def _validate_target_reference_contract(contract: dict[str, Any]) -> None:
-    reference = contract.get("reference_resolution")
-    time_discretization = contract.get("time_discretization")
-    relation = contract.get("allowed_refinement_relation")
-    if not all(
-        isinstance(value, dict)
-        for value in (reference, time_discretization, relation)
-    ):
-        raise ValueError("validation target-reference contract is incomplete")
-    nx_candidates = reference.get("candidates")
-    time_candidates = time_discretization.get("candidates")
-    reference_index = reference.get("selected_candidate_index")
-    time_index = time_discretization.get("selected_candidate_index")
-    if (
-        not isinstance(nx_candidates, list)
-        or not isinstance(time_candidates, list)
-        or type(reference_index) is not int
-        or type(time_index) is not int
-        or not (0 <= reference_index < len(nx_candidates) - 1)
-        or not (0 <= time_index < len(time_candidates) - 1)
-    ):
-        raise ValueError(
-            "validation target-reference selected candidate indices are invalid"
-        )
-    if stable_object_hash(reference.get("selected_value")) != stable_object_hash(
-        nx_candidates[reference_index]
-    ):
-        raise ValueError(
-            "validation selected reference value/index is self-inconsistent"
-        )
-    if stable_object_hash(
-        time_discretization.get("selected_candidate")
-    ) != stable_object_hash(time_candidates[time_index]):
-        raise ValueError(
-            "validation selected time candidate/index is self-inconsistent"
-        )
-    expected_reference_indices = list(range(reference_index, len(nx_candidates)))
-    expected_time_indices = list(range(time_index, len(time_candidates)))
-    expected_relation = {
-        "kind": "validated_candidate_suffix_exact_membership",
-        "reference_nx_allowed_indices": expected_reference_indices,
-        "reference_nx_allowed_values": [
-            nx_candidates[index] for index in expected_reference_indices
-        ],
-        "time_candidate_allowed_indices": expected_time_indices,
-        "time_candidate_allowed_values": [
-            time_candidates[index] for index in expected_time_indices
-        ],
-    }
-    if stable_object_hash(relation) != stable_object_hash(expected_relation):
-        raise ValueError(
-            "validation allowed refinement relation is not the selected "
-            "candidate suffix"
-        )
+    validate_target_reference_contract(contract)
 
 
 def _certificate_payload(
@@ -1002,6 +2579,27 @@ def _certificate_payload(
     checks: dict[str, Any],
     master_payload: dict[str, Any],
 ) -> dict[str, Any]:
+    cross_enabled = (
+        isinstance(
+            spec.target_reference,
+            BurgersConvergenceReferenceSpec,
+        )
+        and spec.target_reference.cross_solver_validation.enabled
+    )
+    cross_solver_validation: dict[str, Any] | None = None
+    if cross_enabled:
+        cross_value = checks.get("cross_solver_validation")
+        if not isinstance(cross_value, dict):
+            raise ValueError(
+                "enabled cross-solver validation evidence is missing"
+            )
+        validate_cross_solver_validation_block(cross_value)
+        _validate_cross_solver_check_against_spec(spec, cross_value)
+        cross_solver_validation = cross_value
+    elif "cross_solver_validation" in checks:
+        raise ValueError(
+            "disabled cross-solver validation must not contain evidence"
+        )
     statuses = {name: value["status"] for name, value in checks.items()}
     overall = "pass" if all(value == "pass" for value in statuses.values()) else "fail"
     foundation = _foundation_contract(
@@ -1013,7 +2611,25 @@ def _certificate_payload(
     if overall == "pass":
         _validate_target_reference_contract(target_reference)
     return {
-        "schema_version": "pol-validation-certificate-v5",
+        "schema_version": "pol-validation-certificate-v12",
+        "reference_convergence_csv_schema_version": (
+            CONVERGENCE_CSV_SCHEMA_VERSION
+        ),
+        "reference_convergence_row_schema_version": (
+            CONVERGENCE_ROW_SCHEMA_VERSION
+        ),
+        "reference_convergence_rows_hash": target_reference[
+            "convergence_evidence"
+        ]["rows_hash"],
+        "cross_solver_check_schema_version": (
+            CROSS_SOLVER_CHECK_SCHEMA_VERSION
+        ),
+        "matched_model1_pipeline_check_schema_version": (
+            MODEL1_CONSISTENCY_CHECK_SCHEMA_VERSION
+        ),
+        "field_quadrature_check_schema_version": (
+            FIELD_QUADRATURE_CHECK_SCHEMA_VERSION
+        ),
         **execution_device_policy(),
         "status": overall,
         "name": spec.name,
@@ -1024,11 +2640,72 @@ def _certificate_payload(
         "foundation_contract_hash": stable_object_hash(foundation),
         "target_reference_contract": target_reference,
         "target_reference_contract_hash": stable_object_hash(target_reference),
+        "cross_solver_validation": cross_solver_validation,
+        "cross_solver_validation_hash": (
+            None
+            if cross_solver_validation is None
+            else stable_object_hash(cross_solver_validation)
+        ),
     }
 
 
+def _publish_solve_failure(
+    spec: ValidationSpec,
+    *,
+    identity: dict[str, Any],
+    master_payload: dict[str, Any],
+    diagnostic: dict[str, Any],
+    force: bool,
+) -> ArtifactRef:
+    store = ArtifactStore(spec.artifact_root)
+    diagnostic_hash = stable_object_hash(diagnostic)
+    failure_identity = {
+        **identity,
+        "failure_artifact_schema_version": "pol-validation-failure-v1",
+        "failure_diagnostic_hash": diagnostic_hash,
+    }
+    failure_ref = store.reference(
+        "validation_failures",
+        failure_identity,
+    )
+    failure = {
+        "schema_version": "pol-validation-failure-v1",
+        "status": "fail",
+        "name": spec.name,
+        "profile": spec.profile,
+        "diagnostic": diagnostic,
+        "diagnostic_hash": diagnostic_hash,
+    }
+
+    def writer(root: Path) -> Iterable[str]:
+        write_strict_json(root / "resolved_spec.json", identity["spec"])
+        write_strict_json(root / "failure.json", failure)
+        atomic_torch_save(
+            root / "master_initial_conditions.pt",
+            master_payload,
+        )
+        return (
+            "resolved_spec.json",
+            "failure.json",
+            "master_initial_conditions.pt",
+        )
+
+    store.publish(
+        failure_ref,
+        identity=failure_identity,
+        writer=writer,
+        force=force,
+    )
+    verify_artifact(failure_ref.path)
+    return failure_ref
+
+
 def run_validation(spec: ValidationSpec, *, force: bool = False) -> ValidationOutcome:
-    max_nx = max(int(value) for value in spec.reference_nx_candidates)
+    _calibration_provenance(spec)
+    max_nx = max(
+        int(value)
+        for value in spec.target_reference.reference_nx_candidates
+    )
     ic = spec.samples.initial_condition
     archive = generate_grf_archive(
         total_samples=spec.samples.total_samples,
@@ -1047,20 +2724,69 @@ def run_validation(spec: ValidationSpec, *, force: bool = False) -> ValidationOu
         boundary="validation workflow input",
         name="initial_conditions",
     )
-    checks = {
-        "periodic_resampling": _resampling_checks(spec),
-        "real_fourier_projector": _fourier_projector_check(spec),
-        "finite_input_interface": _finite_interface_checks(spec, archive),
-        "fixed_decoder": _decoder_checks(spec),
-    }
-    _validate_decoder_characterization(checks["fixed_decoder"])
-    convergence, convergence_rows = _reference_convergence(spec, archive)
-    checks["reference_convergence"] = convergence
     identity = _scientific_identity(spec)
     store = ArtifactStore(spec.artifact_root)
     ref = store.reference("validations", identity)
     master_payload = _master_payload(archive)
     _validate_master_payload_against_spec(master_payload, spec)
+    try:
+        checks = {
+            "periodic_resampling": _resampling_checks(spec),
+            "real_fourier_projector": _fourier_projector_check(spec),
+            "finite_input_interface": _finite_interface_checks(spec, archive),
+            "fixed_decoder": _decoder_checks(spec),
+            "matched_model1_pipeline": run_matched_model1_pipeline_check(
+                domain_length=float(spec.domain.length),
+            ),
+            "field_quadrature": run_field_quadrature_check(
+                domain_length=float(spec.domain.length),
+            ),
+        }
+        _validate_decoder_characterization(checks["fixed_decoder"])
+        validate_matched_model1_pipeline_check(
+            checks["matched_model1_pipeline"],
+            domain_length=float(spec.domain.length),
+        )
+        validate_field_quadrature_check(
+            checks["field_quadrature"],
+            domain_length=float(spec.domain.length),
+        )
+        if isinstance(spec.target_reference, HeatAnalyticReferenceSpec):
+            checks["heat_analytic"] = _heat_analytic_checks(spec)
+        if isinstance(
+            spec.target_reference,
+            ReactionDiffusionConvergenceReferenceSpec,
+        ):
+            checks["reaction_diffusion_characterization"] = (
+                _reaction_diffusion_characterization(spec)
+            )
+        convergence, convergence_rows = _reference_convergence(
+            spec,
+            archive,
+        )
+        checks["reference_convergence"] = convergence
+        if (
+            isinstance(
+                spec.target_reference,
+                BurgersConvergenceReferenceSpec,
+            )
+            and spec.target_reference.cross_solver_validation.enabled
+        ):
+            checks["cross_solver_validation"] = (
+                _burgers_cross_solver_validation(spec, archive)
+            )
+    except _ValidationSolveFailure as exc:
+        failure_ref = _publish_solve_failure(
+            spec,
+            identity=identity,
+            master_payload=master_payload,
+            diagnostic=exc.diagnostic,
+            force=force,
+        )
+        raise RuntimeError(
+            "validation failed because a numerical solve produced a "
+            f"non-finite state; diagnostics: {failure_ref.path}"
+        ) from exc
     certificate = _certificate_payload(
         spec,
         artifact_id=ref.artifact_id,
@@ -1077,20 +2803,7 @@ def run_validation(spec: ValidationSpec, *, force: bool = False) -> ValidationOu
         write_csv(
             root / "reference_convergence.csv",
             convergence_rows,
-            fieldnames=[
-                "check",
-                "coarse",
-                "fine",
-                "coarse_dt",
-                "coarse_fine_dt",
-                "fine_dt",
-                "fine_fine_dt",
-                "time_candidate",
-                "mean_relative_l2",
-                "max_relative_l2",
-                "low_mode_relative_l2",
-                "status",
-            ],
+            fieldnames=CONVERGENCE_ROW_FIELDS,
         )
         atomic_torch_save(root / "master_initial_conditions.pt", master_payload)
         return (

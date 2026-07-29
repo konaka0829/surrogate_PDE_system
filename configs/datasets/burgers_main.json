@@ -1,5 +1,5 @@
 {
-  "schema_version": "pol-dataset-v2",
+  "schema_version": "pol-dataset-v3",
   "name": "burgers_reference_main",
   "artifact_root": "artifacts",
   "validation_spec": "configs/validation/foundation_main.json",

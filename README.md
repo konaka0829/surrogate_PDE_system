@@ -24,10 +24,23 @@ trial and study execution path.
 - The surrogate initial state is constructed from the finite `n_tar` input.
   Discarded reference-grid modes are never recovered or exposed to the feature
   generator.
+- Every validation artifact includes a fixed synthetic matched-dynamics
+  diagnostic that independently evolves the finite target and encoded
+  surrogate states through heat, Burgers, and reaction-diffusion pipelines,
+  checks Model 1 coefficients and q-projected fields, and records the separate
+  full-field representation floor.
+- Every validation artifact also includes a fixed analytic field-quadrature
+  diagnostic. It verifies the periodic trapezoidal `L2` normalization on
+  odd/even and non-unit grids, selects a stable reference-grid suffix against
+  exact Fourier-orthogonality values, and separately checks fixed-`n_tar`
+  data-space metrics and representation floors.
 - Scientific configuration is strict: unknown keys are rejected with their
   JSON path.
 - Hyperparameter and system selection use the training and validation splits
   only.
+- Numerical-foundation and reference-convergence calibration IDs are bound to
+  the same deterministic CPU `torch.randperm` split used by datasets. Test
+  overlap is rejected before validation computation or artifact publication.
 - Random-feature evaluation seeds are independent model realizations. Primary
   test results summarize per-seed metrics; prediction averaging is reported
   separately as an ensemble model.
@@ -78,17 +91,24 @@ Before Phase 2-01, this kernel inferred the inverse-transform length as
 `nx=14` and `nx=15` have RFFT width 8, an odd-grid state was transformed on a
 different real grid. Phase 2-01 removes that inference. Independent float64
 tests cover direct conservative nonlinear terms and short trajectories on
-`nx=15,16`, with dealiasing disabled and enabled. Exact hashes preserve the
-pre-correction even-grid nonlinear and trajectory outputs.
+`nx=15,16`, with dealiasing disabled and enabled. Odd-grid correctness is
+covered by this independent mathematical reference. Separately, a test-local
+reproduction of the pre-correction even-grid algorithm checks exact tensor
+equality with the corrected implementation in the same runtime, for both the
+nonlinear coefficients and a short trajectory.
 
 ETDRK4 was not changed: focused parity tests confirm that its real-space
 nonlinear inputs and Fourier coefficient lengths remain consistent on odd and
 even grids, and that short trajectories preserve shape and finiteness.
 
-This correction does not complete Phase 2. Target-specific heat convergence,
-production-grade Burgers convergence, cross-solver comparison,
-reaction-diffusion convergence, and reference-field metric quadrature
-convergence remain future tasks.
+Phase 2-04 subsequently adds target-specific reaction-diffusion
+characterization and smoke-scale spatial/time/joint convergence. Phase 2-05A
+adds the profile-independent matched Model 1 pipeline suite, including
+discarded-mode information isolation and a time-mismatch negative control.
+Phase 2-05B adds analytic periodic-`L2` characterization and a
+profile-independent reference-grid quadrature convergence certificate while
+holding the continuous prediction and target fixed. Main-scale heat, Burgers,
+and reaction-diffusion certificates remain future validation work.
 
 ## Repository layout
 
@@ -100,7 +120,7 @@ pol/
 ├── data/         validation-bound reference datasets and finite-resolution views
 ├── learning/     observations, fixed decoder, ridge, random features, metrics
 ├── validation/   independent algebraic and numerical foundation validation
-├── study/        unified trial, search, selection, convergence, freeze/test flow
+├── study/        cases, trial/search, readouts, freeze protocol, results, verification
 ├── artifacts/    content-addressed artifact store
 ├── plotting/     generic reporters over long-form result tables
 ├── numerics/     import-light numerical kernels
@@ -117,6 +137,13 @@ studies/
 `studies/` contains only declarative combinations of reusable components. The
 core package does not import it and contains no publication- or
 experiment-number control flow.
+
+Within `pol/study`, `cases.py` owns pure planning, `trial.py` coordinates one
+validated trial, `readouts.py` and `evaluation.py` own model and metric
+primitives, `protocol.py` owns the persisted selection/freeze boundary,
+`results.py` owns table/summary serialization, and `verification.py` is the
+read-only completed-run verifier. `runner.py` is the public high-level
+orchestrator over those responsibilities.
 
 ## Installation
 
@@ -141,7 +168,7 @@ readout fitting and freezing, test evaluation, diagnostics, and study
 publication/verification.
 
 `samples.device` defaults to `"cpu"` and is the only accepted value in the
-`pol-validation-v3` schema. `"cuda"`, `"auto"`, and unknown values fail during
+latest `pol-validation-v6` schema. `"cuda"`, `"auto"`, and unknown values fail during
 configuration loading; they are never silently converted to CPU. A
 CUDA-enabled PyTorch wheel may still report a non-null `torch_cuda_version` in
 the numerical environment fingerprint. That field describes the installed
@@ -175,14 +202,34 @@ python -m pol --help
 
 ```bash
 python -m pol validate configs/validation/foundation_smoke.json
+python -m pol validate configs/validation/heat_smoke.json
+python -m pol validate configs/validation/reaction_diffusion_smoke.json
 ```
 
 The validation layer is independent of prediction studies. It checks periodic
 resampling and Nyquist handling, the real Fourier projector, finite-input/no-
 leak behavior, valid use of `n_tar < J`, fixed-decoder behavior and aliasing,
-and Burgers reference convergence. A passing certificate and master initial-
-condition archive are published under `artifacts/validations/<content-hash>/`.
-The certificate records separate machine-readable foundation and Burgers
+and target-specific reference validation selected by the strict
+`target_reference` union. `burgers_convergence` owns Burgers spatial/time
+candidate refinement. Its optional cross-solver diagnostic first checks
+independent split-step and ETDRK4 self-convergence sequences on the finest
+grid, then stores a symmetric finest-solution discrepancy without naming
+either method as truth. That supporting block never extends the primary
+dataset-binding suffix. `heat_analytic` checks the exact spectral Fourier
+multiplier independently on constant, sine, cosine, multimode, odd/even,
+non-unit-domain, and float32/float64 cases, then measures spatial truncation
+convergence over reference-resolution candidates. Heat records
+`temporal_status=analytic_exact` and has no time-step candidates.
+`reaction_diffusion_convergence`
+constructs independent expectations for zero/constant/nonzero-equilibrium
+fields and the `beta=0` one-step Fourier multiplier, then reuses the generic
+spatial, time-candidate, and actual selected-versus-finest joint convergence
+path. Its time candidates keep
+`semi_implicit_spectral_euler` and `nonlinear_filter` fixed while `dt`
+strictly decreases; switching between `none` and `two_thirds` is rejected.
+A passing certificate and master initial-condition archive are published under
+`artifacts/validations/<content-hash>/`.
+The certificate records separate machine-readable foundation and generic
 target-reference contracts, selected candidate indices, complete ordered
 candidate lists, exact allowed suffixes, and master-archive tensor hashes.
 The P0-03 foundation contract additionally binds the actual GRF sampler
@@ -195,6 +242,10 @@ P0-05 adds a certificate-bound case with requested `q` above the directly
 observable fixed-decoder bandwidth. It records the requested/observable
 bandwidth, half-open zero-filled coefficient range, zero-filled mode range,
 observable-prefix error, and an exact-zero check for the filled suffix.
+Review Gate B additionally binds the configured calibration IDs to the
+dataset split policy, counts, seed, and canonical split hash. The certificate
+records each calibration ID's train/validation membership and a zero test-
+overlap count; loading reconstructs this provenance and rejects tampering.
 
 ### 2. Build or reuse a target dataset
 
@@ -203,22 +254,30 @@ python -m pol data build configs/datasets/burgers_smoke.json
 ```
 
 A dataset is built only from a passing validation certificate and an explicit
-`pol-dataset-v2` binding:
+`pol-dataset-v3` binding:
 
 - `validated_reference` requires the target system, invariant PDE parameters,
   evolution time, dtype, and domain to match the certificate exactly.
-  `reference_nx` and the complete solver/time-candidate dictionary must be
-  exact members of their respective validated candidate suffixes.
+  `reference_nx` and the canonical numerical condition must be exact members
+  of their respective validated candidate suffixes. Heat binds to
+  `{"solver":"spectral_exact"}`. Burgers binds the complete canonical
+  solver condition: requested outer/fine steps, outer-step count, actual
+  effective substep, substeps per outer step, and dealias policy.
+  Reaction-diffusion binds `nu`, `alpha`, `beta`, final time, domain, dtype,
+  `reference_nx`, and the exact canonical
+  `solver`/`dt`/`nonlinear_filter` tuple.
 - `foundation_only` reuses only the checked initial-condition foundation and
   master archive. It requires a nonempty reason and records
   `target_reference_validation_status=not_claimed`.
 
-The binding proof is evaluated before target evolution. Its proof hash, split
-IDs, reference inputs, reference targets, target-solver metadata, and tensor
-hashes are stored under `artifacts/datasets/<content-hash>/`. For example, the
-Burgers smoke dataset may use `reference_nx=64` after selection at 32 because
-64 is an actual member of the certificate's validated suffix; 48 would be
-rejected even though it is larger than 32.
+The binding proof is evaluated before target evolution. It verifies the same
+split policy/version, counts, seed, canonical split hash, and calibration
+provenance recorded by validation. Its proof hash, split IDs, reference inputs,
+reference targets, target-solver metadata, and tensor hashes are stored under
+`artifacts/datasets/<content-hash>/`. For example, the Burgers smoke dataset
+may use `reference_nx=64` after selection at 32 because 64 is an actual member
+of the certificate's validated suffix; 48 would be rejected even though it is
+larger than 32.
 
 ### 3. Run a study
 
@@ -290,8 +349,12 @@ norm. Whether that target-reference condition is convergence validated is
 reported separately by the dataset binding status. `data_field_*` metrics are
 also reported on the finite `n_tar` target grid. This distinction prevents a
 change in `n_tar` from silently changing the meaning of the principal error
-metric and prevents a foundation-only heat dataset from being mislabeled as a
-validated heat reference.
+metric and keeps the dataset's target-specific validation claim explicit.
+For endpoint-free values `v_j`, the implemented norm is
+`sqrt((L/n) * sum_j v_j^2)`. The validation foundation checks it against exact
+constant, trigonometric-mode, and orthonormal-Fourier Parseval formulas, then
+varies only `n_ref` over `[8,15,16,31,32]`; the fixed-`n_tar=16`
+`data_field_*` quantities must remain unchanged.
 
 A `StudySpec` adds:
 
@@ -404,18 +467,25 @@ the validation, selection, frozen, and test copies. `run_summary.json` records
 the selected direct-decoder diagnostic count, zero-fill count, and any-zero-
 fill flag.
 
-P0-05 uses study-run identity, manifest, summary, selection, frozen plan, and
-frozen-model archive `v5`, plus study dataset-reference `v3`. Validation
-identity/certificate use `v5`, and the validation foundation contract uses
-`v4`; the initial-condition and dataset artifact families remain at `v4`,
-foundation master binding and dataset binding proof remain at `v3`, and
-feature-state identity/archive/metadata remain at `v2`. Earlier study runs and
-validation certificates are rejected rather than treated as carrying complete
-fixed-decoder diagnostics. Package version `0.2.6` is recorded by numerical-
-environment schema `pol-numerical-environment-v2`; therefore pre-Phase-2-01
-version `0.2.5` numerical artifacts cannot share identities with results after
-the split-step odd-grid correction. Artifact structural schemas are unchanged.
-The earlier binding and CPU-only semantics remain intact.
+Study-run identity, manifest, summary, selection, and frozen-model schemas
+remain at `v5`, with study dataset-reference at `v3`. Validation
+configuration is `pol-validation-v6` for reaction-diffusion (existing v5
+heat/Burgers specs remain parseable for migration); Phase 2-05B advances
+validation identity/certificate to `v12`, adds
+`pol-field-quadrature-check-v1`, retains
+`pol-matched-model1-pipeline-check-v1`, and retains nested
+`pol-burgers-cross-solver-spec-v1` /
+`pol-burgers-cross-solver-check-v2` semantics. The foundation contract is
+`v8`, and the generic primary target-reference contract remains `v4`.
+Dataset configuration remains `pol-dataset-v3`, binding proofs are `v7`,
+and dataset identity/metadata/archive/resolved-spec families remain `v5`.
+The foundation master binding remains at `v3`, initial-condition archives at
+`v4`, and feature-state identity/archive/metadata at `v2`. Earlier validation
+artifacts are rejected rather than silently treated as carrying the
+Phase 2-05B semantics. Long-form primary and self-convergence rows use
+`pol-reference-convergence-row-v3`; the primary CSV is
+`pol-reference-convergence-csv-v3`. Package version `0.2.13` is recorded by
+numerical-environment schema `pol-numerical-environment-v2`.
 
 ## Included profiles
 
@@ -426,10 +496,12 @@ Smoke profiles are intentionally small and are used for integration checks:
 - `observation_output_map_smoke.json`
 - `finite_surrogate_resolution_map_smoke.json`
 
-The Burgers dataset profiles use `validated_reference`. The heat profiles use
-`foundation_only`: they reuse the Burgers certificate's initial-condition
-foundation, but do not claim that Burgers convergence validates the heat
-target solver or reference condition.
+Both Burgers and heat dataset profiles use `validated_reference`. Burgers
+binds to the Burgers convergence certificate; heat binds only to its
+heat-specific analytic/spatial certificate and the exact
+`spectral_exact` condition. Burgers smoke enables the small cross-solver
+diagnostic. Burgers main declares it disabled and has not been executed or
+cross-solver calibrated.
 
 The two phase diagrams are deliberately separate. The observation/output map
 varies `J × q` while holding `n_tar` and `n_sur` fixed. The finite/surrogate
@@ -450,11 +522,16 @@ ambiguity, explicit-`nx` validation, odd/even nonlinear and short-trajectory
 references, exact even-grid preservation, and ETDRK4 parity; GRF
 physical-domain covariance scaling on odd and even grids; unit-domain and
 P0-04 CPU deterministic regressions; finite-input information isolation;
+deterministic split ID/hash preservation; calibration/test separation before
+validation compute; calibration certificate/binding provenance and tamper
+rejection;
 strict CPU-only configuration; CPU tensor invariants at artifact boundaries;
 execution-policy tamper detection; dimension independence; fixed and learned
 readouts; artifact tamper detection; fixed-decoder observable bandwidth and
 exact zero-fill regression; learned `J -> q` readouts with `q > J`;
-decoder-diagnostic binding/tamper detection; foundation validation; dataset
+decoder-diagnostic binding/tamper detection; analytic periodic norms,
+reference-grid quadrature convergence, field/data metric separation, and
+quadrature certificate tamper detection; foundation validation; dataset
 splitting; unified scalar/sweep planning; selection freezing; test-order
 enforcement; plot regeneration; CLI behavior; and the absence of
 publication-number namespaces from the core package.

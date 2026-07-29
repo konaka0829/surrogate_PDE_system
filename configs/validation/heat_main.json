@@ -1,6 +1,6 @@
 {
   "schema_version": "pol-validation-v5",
-  "name": "periodic_burgers_foundation_main",
+  "name": "periodic_heat_reference_main",
   "artifact_root": "artifacts",
   "profile": "main",
   "domain": {
@@ -24,18 +24,13 @@
     "preprocessing": "l2_scaling_only"
   },
   "target_reference": {
-    "kind": "burgers_convergence",
+    "kind": "heat_analytic",
     "reference_evolution": {
       "system": {
-        "kind": "burgers",
-        "nu": 0.01,
-        "advection_coefficient": 1.0,
-        "solver": "split_step",
-        "dt": 0.001,
-        "fine_dt": 1e-05,
-        "dealias": true
+        "kind": "heat",
+        "nu": 0.01
       },
-      "time": 1.0
+      "time": 0.01
     },
     "calibration_sample_ids": [
       0,
@@ -48,35 +43,11 @@
       2048,
       4096
     ],
-    "time_candidates": [
-      {
-        "solver": "split_step",
-        "dt": 0.001,
-        "fine_dt": 5e-05,
-        "dealias": true
-      },
-      {
-        "solver": "split_step",
-        "dt": 0.001,
-        "fine_dt": 2e-05,
-        "dealias": true
-      },
-      {
-        "solver": "split_step",
-        "dt": 0.001,
-        "fine_dt": 1e-05,
-        "dealias": true
-      }
-    ],
     "q_reference_check": 257,
     "reference_tolerances": {
-      "mean_relative_l2": 0.0001,
-      "max_relative_l2": 0.0005,
-      "low_mode_relative_l2": 1e-05
-    },
-    "cross_solver_validation": {
-      "schema_version": "pol-burgers-cross-solver-spec-v1",
-      "enabled": false
+      "mean_relative_l2": 1e-09,
+      "max_relative_l2": 1e-08,
+      "low_mode_relative_l2": 1e-10
     }
   },
   "algebraic_tolerances": {

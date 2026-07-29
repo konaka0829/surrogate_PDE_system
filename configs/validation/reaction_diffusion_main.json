@@ -1,6 +1,6 @@
 {
-  "schema_version": "pol-validation-v5",
-  "name": "periodic_burgers_foundation_main",
+  "schema_version": "pol-validation-v6",
+  "name": "periodic_reaction_diffusion_reference_main",
   "artifact_root": "artifacts",
   "profile": "main",
   "domain": {
@@ -24,16 +24,16 @@
     "preprocessing": "l2_scaling_only"
   },
   "target_reference": {
-    "kind": "burgers_convergence",
+    "kind": "reaction_diffusion_convergence",
     "reference_evolution": {
       "system": {
-        "kind": "burgers",
+        "kind": "reaction_diffusion",
         "nu": 0.01,
-        "advection_coefficient": 1.0,
-        "solver": "split_step",
-        "dt": 0.001,
-        "fine_dt": 1e-05,
-        "dealias": true
+        "alpha": 1.0,
+        "beta": 1.0,
+        "solver": "semi_implicit_spectral_euler",
+        "dt": 0.00025,
+        "nonlinear_filter": "two_thirds"
       },
       "time": 1.0
     },
@@ -50,33 +50,26 @@
     ],
     "time_candidates": [
       {
-        "solver": "split_step",
+        "solver": "semi_implicit_spectral_euler",
         "dt": 0.001,
-        "fine_dt": 5e-05,
-        "dealias": true
+        "nonlinear_filter": "two_thirds"
       },
       {
-        "solver": "split_step",
-        "dt": 0.001,
-        "fine_dt": 2e-05,
-        "dealias": true
+        "solver": "semi_implicit_spectral_euler",
+        "dt": 0.0005,
+        "nonlinear_filter": "two_thirds"
       },
       {
-        "solver": "split_step",
-        "dt": 0.001,
-        "fine_dt": 1e-05,
-        "dealias": true
+        "solver": "semi_implicit_spectral_euler",
+        "dt": 0.00025,
+        "nonlinear_filter": "two_thirds"
       }
     ],
     "q_reference_check": 257,
     "reference_tolerances": {
-      "mean_relative_l2": 0.0001,
-      "max_relative_l2": 0.0005,
-      "low_mode_relative_l2": 1e-05
-    },
-    "cross_solver_validation": {
-      "schema_version": "pol-burgers-cross-solver-spec-v1",
-      "enabled": false
+      "mean_relative_l2": 0.002,
+      "max_relative_l2": 0.005,
+      "low_mode_relative_l2": 0.001
     }
   },
   "algebraic_tolerances": {

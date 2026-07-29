@@ -1,14 +1,24 @@
 from __future__ import annotations
 
+import math
+
 import torch
 
-from pol.math.fourier import real_fourier_synthesis
+from pol.math.fourier import real_fourier_analysis, real_fourier_synthesis
 from pol.math.periodic import spectral_resample_periodic
 
 
 def periodic_l2_norm(values: torch.Tensor, *, domain_length: float) -> torch.Tensor:
-    if values.ndim < 1:
-        raise ValueError("values must have a spatial axis")
+    if values.ndim < 1 or values.shape[-1] < 1:
+        raise ValueError("values must have a nonempty spatial axis")
+    if not values.dtype.is_floating_point:
+        raise TypeError("values must be real floating point")
+    if (
+        isinstance(domain_length, bool)
+        or not math.isfinite(float(domain_length))
+        or float(domain_length) <= 0.0
+    ):
+        raise ValueError("domain_length must be positive and finite")
     return torch.sqrt(
         (float(domain_length) / float(values.shape[-1]))
         * values.square().sum(dim=-1)
@@ -28,6 +38,77 @@ def samplewise_l2_errors(
         torch.finfo(target.dtype).eps
     )
     return absolute, absolute / denominator
+
+
+def symmetric_field_discrepancy(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    *,
+    q: int,
+    domain_length: float,
+) -> dict[str, float]:
+    """Compare two same-grid fields without designating either as truth.
+
+    Both field and low-mode relative errors use
+    ``2 * ||a - b|| / (||a|| + ||b||)`` samplewise.  The denominator is
+    clamped only for the all-zero case, where the zero numerator yields zero.
+    """
+    if (
+        a.ndim != 2
+        or b.ndim != 2
+        or a.shape != b.shape
+        or a.dtype != b.dtype
+        or a.device != b.device
+    ):
+        raise ValueError(
+            "symmetric discrepancy requires same-shape, dtype, and device "
+            "fields with shape (samples, nx)"
+        )
+    if (
+        isinstance(domain_length, bool)
+        or not math.isfinite(float(domain_length))
+        or float(domain_length) <= 0.0
+    ):
+        raise ValueError("domain_length must be positive and finite")
+    if not bool(torch.isfinite(a).all()) or not bool(torch.isfinite(b).all()):
+        raise ValueError("symmetric discrepancy inputs must be finite")
+
+    absolute = periodic_l2_norm(a - b, domain_length=domain_length)
+    denominator = (
+        periodic_l2_norm(a, domain_length=domain_length)
+        + periodic_l2_norm(b, domain_length=domain_length)
+    ).clamp_min(torch.finfo(a.dtype).eps)
+    relative = 2.0 * absolute / denominator
+
+    a_coefficients = real_fourier_analysis(
+        a,
+        q,
+        domain_length=domain_length,
+    )
+    b_coefficients = real_fourier_analysis(
+        b,
+        q,
+        domain_length=domain_length,
+    )
+    low_absolute = torch.linalg.vector_norm(
+        a_coefficients - b_coefficients,
+        dim=-1,
+    )
+    low_denominator = (
+        torch.linalg.vector_norm(a_coefficients, dim=-1)
+        + torch.linalg.vector_norm(b_coefficients, dim=-1)
+    ).clamp_min(torch.finfo(a.dtype).eps)
+    low_relative = 2.0 * low_absolute / low_denominator
+    metrics = {
+        "mean_absolute_l2": float(absolute.mean()),
+        "max_absolute_l2": float(absolute.max()),
+        "mean_relative_l2": float(relative.mean()),
+        "max_relative_l2": float(relative.max()),
+        "low_mode_relative_l2": float(low_relative.mean()),
+    }
+    if not all(math.isfinite(value) and value >= 0.0 for value in metrics.values()):
+        raise ValueError("symmetric discrepancy metrics must be finite")
+    return metrics
 
 
 def aggregate(values: torch.Tensor, prefix: str) -> dict[str, float]:

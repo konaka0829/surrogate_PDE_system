@@ -116,7 +116,7 @@ def test_device_resolution_never_consults_cuda_availability(
 def test_environment_fingerprint_separates_policy_from_cuda_build_metadata() -> None:
     fingerprint = numerical_environment_fingerprint()
     assert fingerprint["schema_version"] == "pol-numerical-environment-v2"
-    assert __version__ == "0.2.6"
+    assert __version__ == "0.2.13"
     assert fingerprint["pol_version"] == __version__
     assert {
         key: fingerprint[key] for key in execution_device_policy()
@@ -124,7 +124,7 @@ def test_environment_fingerprint_separates_policy_from_cuda_build_metadata() -> 
     assert "torch_cuda_version" in fingerprint
 
     pre_correction = dict(fingerprint)
-    pre_correction["pol_version"] = "0.2.5"
+    pre_correction["pol_version"] = "0.2.6"
     assert stable_object_hash(pre_correction) != stable_object_hash(fingerprint)
 
 

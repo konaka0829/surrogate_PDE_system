@@ -70,17 +70,21 @@ def _load(model: type[T], path: str | Path, *, repo_root: Path, kind: str) -> T:
     if kind == "validation" and schema_version in {
         "pol-validation-v1",
         "pol-validation-v2",
+        "pol-validation-v3",
+        "pol-validation-v4",
     }:
         raise ValueError(
             f"unsupported legacy validation schema {schema_version}; "
-            "migrate to pol-validation-v3 with samples.device='cpu' and "
-            "regenerate the certificate"
+            "migrate to pol-validation-v6 with a refinement-validated "
+            "target_reference specification and regenerate the certificate"
         )
-    if kind == "dataset" and schema_version == "pol-dataset-v1":
+    if kind == "dataset" and schema_version in {
+        "pol-dataset-v1",
+        "pol-dataset-v2",
+    }:
         raise ValueError(
-            "unsupported legacy dataset schema pol-dataset-v1; migrate to "
-            "pol-dataset-v2 and add an explicit validated_reference or "
-            "foundation_only binding"
+            f"unsupported legacy dataset schema {schema_version}; migrate to "
+            "pol-dataset-v3 and regenerate the target-reference binding proof"
         )
     prepared = _prepare_paths(raw, repo_root=repo_root, kind=kind)
     try:

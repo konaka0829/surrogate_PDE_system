@@ -104,19 +104,67 @@ the finite `n_tar` target. A target-reference convergence claim is valid only
 when the dataset carries a passing `validated_reference` proof; the same grid
 role in a `foundation_only` dataset does not imply such a claim.
 
+## Matched Model 1 pipeline consistency
+
+Every current validation artifact carries a profile-independent synthetic
+foundation check for the fixed Model 1 pipeline. Each positive case executes
+
+```text
+synthetic reference field
+  -> spectral restriction to n_tar
+  -> build_feature_initial_state(finite field, n_sur)
+  -> registered surrogate evolution
+  -> J equispaced observations
+  -> fixed Fourier decoder to q coefficients
+```
+
+The expected coefficients come from a separate registered target evolution
+whose input is the same finite `n_tar` field, followed by
+`real_fourier_analysis(..., q)`. Target and surrogate evolution outputs must
+be distinct tensors produced by distinct calls; equality of their conditions
+does not authorize reusing one solve. The synthetic reference tensor is never
+passed to the feature-state constructor.
+
+Exact-recovery cases select `q <= observable_q(J)` locally. This is a
+diagnostic case condition only and does not add a general `q <= J` constraint.
+Requests above the fixed decoder's observable band remain valid and retain the
+separate structural zero-fill characterization.
+
+The check covers exact heat flow on odd/even equal grids, heat flow with
+different finite and surrogate resolutions, split-step Burgers on odd/even
+grids, a small ETDRK4 Burgers case, and reaction-diffusion. A paired-reference
+heat case adds a discarded high mode and verifies equality of the finite
+field, encoded feature input, target coefficients, and prediction within the
+algebraic tolerance. A deliberately mismatched heat readout time is a negative
+control; detecting a difference is its passing outcome.
+
+Pipeline consistency is assessed in coefficient space and between the two
+`q`-projected fields. The separately reported representation floor compares
+the target's `q` projection with its full finite evolved field. Nonlinear
+evolution can therefore have a nonzero representation floor while the
+pipeline check passes exactly.
+
 ## Validation binding and provenance
 
 Content-addressed provenance proves which bytes and upstream identities were
 used. It does not, by itself, prove that a requested target-reference
-condition was numerically convergence validated. Every `pol-dataset-v2`
+condition was numerically convergence validated. Every `pol-dataset-v3`
 configuration must therefore select exactly one binding:
 
 - `validated_reference` binds the dataset target to the certificate's target
   system kind, invariant PDE parameters, evolution time, dtype, and domain by
   canonical exact equality. The dataset `reference_nx` must be an actual
-  candidate at or after the selected reference candidate. Its
-  solver/`dt`/`fine_dt`/dealias dictionary must likewise be an actual candidate
-  at or after the selected time candidate.
+  candidate at or after the selected reference candidate. Its canonical
+  numerical condition must likewise be an exact member of the validated
+  condition suffix. For the exact spectral heat flow this condition is only
+  `{"solver":"spectral_exact"}`; no `dt` or temporal-refinement candidate is
+  manufactured. A Burgers condition is the canonical tuple
+  `solver`, `requested_outer_dt`, `requested_fine_dt`,
+  `outer_step_count`, `effective_substep`, `substeps_per_outer`, and
+  `dealias`. Dataset `dt`/`fine_dt` values are canonicalized into that complete
+  tuple before exact suffix membership is tested. A reaction-diffusion
+  condition is exactly `solver`, `dt`, and `nonlinear_filter`; `nu`, `alpha`,
+  and `beta` remain invariant PDE parameters and are checked separately.
 - `foundation_only` binds only to the passing general foundation checks,
   sample/split/seed and initial-condition contract, domain, dtype, and master
   initial-condition archive identity and capacity. It requires a nonempty
@@ -127,6 +175,99 @@ allowed relation is exact membership in the recorded suffix, not an inequality
 rule: a larger unlisted resolution or a smaller unlisted time step is not
 accepted. A foundation-only proof cannot be upgraded, aliased, or used as a
 fallback for `validated_reference`.
+
+For Burgers, candidate order has the following formal meaning. Reference
+resolutions are unique and strictly increasing. Time candidates use one
+canonical solver family and one dealias policy, and every requested outer step
+must divide the common final time within the solver alignment tolerance.
+For split-step,
+
+```text
+substeps_per_outer = ceil(requested_outer_dt / requested_fine_dt)
+effective_substep = requested_outer_dt / substeps_per_outer
+```
+
+An adjacent coarse-to-fine pair must have nonincreasing requested outer step
+and nonincreasing effective substep, with at least one strict decrease.
+Different requested `fine_dt` values that produce the same actual condition
+are therefore not a refinement. For ETDRK4, `requested_fine_dt` is null,
+`effective_substep=requested_outer_dt`, `substeps_per_outer=1`, and adjacent
+requested steps are strictly decreasing. Solver aliases are canonicalized
+before comparison; switching canonical families or dealias policy inside a
+sequence is invalid. These rules validate convergence within one solver
+family only and make no split-step-versus-ETDRK4 accuracy claim.
+
+For reaction-diffusion, every candidate uses
+`semi_implicit_spectral_euler`, every `dt` aligns with the common final time,
+and `dt` is unique and strictly decreasing. The entire sequence uses one
+fixed `nonlinear_filter`. In particular, `none` and `two_thirds` are distinct
+method conditions and switching between them is never a refinement relation.
+The reference evolution's canonical `solver`/`dt`/`nonlinear_filter`
+condition must exactly equal the finest candidate.
+
+Spatial comparisons evolve spectral restrictions of one finite master field
+with the finest canonical time condition. Temporal comparisons use the finest
+reference resolution. The joint comparison independently evolves the
+selected `(n_ref, time condition)` and compares it with the finest
+`(n_ref, time condition)`; spatial and temporal pass statuses do not imply a
+joint pass. Each comparison records its explicit common periodic grid, three
+finite relative-L2 metrics, complete coarse/fine canonical conditions, and a
+row hash. The selected candidate is the first candidate whose entire adjacent
+pair suffix passes, with the finest pair required to pass. Certificate loading
+reconstructs that selection and both allowed exact suffixes from the ordered
+candidates and hashed rows.
+
+An enabled Burgers cross-solver diagnostic is supporting evidence, not a
+target-reference selection rule. It independently validates one split-step
+candidate sequence and one ETDRK4 candidate sequence on the finest configured
+reference grid, reusing the same actual-step refinement proof and the same
+non-test calibration initial tensor for both. Each family's finest adjacent
+pair must pass before the two finest solutions are compared. The field-space
+relative discrepancy is samplewise
+
+```text
+2 * ||u_split - u_etd||_L2
+--------------------------------
+||u_split||_L2 + ||u_etd||_L2
+```
+
+and the low-mode discrepancy uses the same two-norm-over-sum definition for
+the two real-Fourier coefficient vectors. Mean/max absolute L2, mean/max
+symmetric relative L2, and mean symmetric low-mode relative L2 are stored.
+Neither solver is labeled as ground truth. The diagnostic block records both
+canonical candidate lists, refinement proofs, long-form self-convergence rows
+and hashes, runtime step metadata, finest conditions, common grid, sample IDs,
+metric definition, tolerances, and discrepancy evidence hash.
+
+The cross-solver block is separate from the primary target-reference contract.
+In particular, an ETDRK4 condition in supporting evidence is never inserted
+into a split-step dataset's `allowed_refinement_relation`; dataset binding
+continues to use only exact members of the primary selected solver-family
+suffix.
+
+Target-reference validation is a strict semantic union within the single
+validation execution path. The common foundation and calibration/test
+isolation checks are shared. `burgers_convergence` owns its time-refinement
+candidates. `heat_analytic` separately establishes the Fourier multiplier
+\(\exp[-\nu(2\pi m/L)^2t]\) on constant, sine, cosine, multimode, odd/even,
+non-unit-domain, and float32/float64 cases, then validates spatial truncation
+over the configured reference-resolution candidates. Heat temporal status is
+`analytic_exact`, while its spatial convergence status and selected
+reference-resolution suffix are recorded independently.
+`reaction_diffusion_convergence` independently characterizes the production
+semi-implicit spectral Euler scheme using zero and nonzero constant fields,
+the scalar recurrence
+`c_next=c+dt*alpha*c-dt*beta*c^3`, applicable equilibria
+`+-sqrt(alpha/beta)`, and the `beta=0` one-step Fourier multiplier
+`(1+dt*alpha)/(1+dt*nu*(2*pi*m/L)^2)`. Expected values are constructed by
+scalar/tensor algebra rather than by a second call to the production spatial
+solver. It then uses the same generic spatial, temporal, coarsest-stable-
+suffix, and independently evaluated joint convergence path as Burgers.
+
+Every validation solve is checked for finite output immediately. A NaN/Inf
+state is an instability failure, not a reason to relax tolerances. Its
+diagnostic is transactionally published as an exact-byte-verified validation
+failure artifact.
 
 The binding proof is constructed before any dataset target evolution. The
 canonical proof and its hash are part of the dataset identity and are copied
@@ -143,6 +284,21 @@ The data splits have disjoint responsibilities:
   parameters, and any other candidate;
 - **test** is used only once the complete choice and evaluation procedure have
   been frozen.
+
+Numerical-foundation checks and target-reference convergence are part of this
+isolation contract. Their explicitly configured calibration sample IDs must be
+classified by the same deterministic CPU `torch.randperm` split primitive,
+with the same counts and seed, that dataset construction uses. Calibration IDs
+may belong to train or validation, but never test. Any test overlap is rejected
+before initial-condition generation, PDE solves, or artifact publication; IDs
+must not be chosen or replaced in response to solver results.
+
+The validation certificate records the calibration IDs, their train/validation
+membership, zero test-overlap count, split policy/version, and the canonical
+split hash. Certificate loading reconstructs that payload. Dataset binding
+recomputes the same split contract and hash before target evolution, and
+dataset loading verifies that the stored split tensors are exactly those
+produced by the shared primitive.
 
 Before requesting a test feature state or computing any test metric, the
 runner must:
@@ -169,6 +325,11 @@ fields.
 Field-space error and data-space error are different scientific quantities and
 must be stored separately.
 
+- For endpoint-free values `v_j` on `n` uniform nodes of `[0,L)`, the
+  implemented periodic trapezoidal norm is
+  `sqrt((L/n) * sum_j v_j^2)`. The real Fourier synthesis basis is
+  `L2`-orthonormal, so a resolved trigonometric polynomial with coefficient
+  vector `a` satisfies `||v||_L2^2=sum_i a_i^2`.
 - Unqualified `field_*` metrics compare a `q`-coefficient reconstruction with
   the dataset target on `n_ref`, using that grid for periodic field quadrature.
   The separate dataset binding says whether convergence validation of that
@@ -178,6 +339,28 @@ must be stored separately.
 
 Neither metric may silently replace the other. Representation-floor metrics
 must retain the same distinction.
+
+Samplewise relative field error divides the absolute periodic norm by the
+target periodic norm clamped below by the target dtype's machine epsilon.
+Thus a zero target and zero error produces zero, while a nonzero prediction
+against a zero target produces `absolute_error / eps`; this established
+epsilon-clamp policy is not an exact scale-invariant relative error at zero.
+
+Every current validation artifact carries a separate, profile-independent
+field-quadrature foundation check. It holds one continuous target, one
+coefficient prediction, and one finite `n_tar=16` target fixed while changing
+only the reference quadrature grid over the strictly increasing candidates
+`[8,15,16,31,32]`. The target's maximum mode is seven. Grid 8 intentionally
+under-resolves the squared error and representation-floor integrands; grids
+15 and above resolve them. Continuous target, error, and representation-floor
+norms are calculated directly by Fourier orthogonality rather than by
+declaring the finest numerical grid to be truth.
+
+The selected reference quadrature is the coarsest candidate whose complete
+suffix agrees with both analytic absolute and relative norms, with the finest
+candidate pair required to agree. The exact allowed suffix, row order, row
+hashes, tolerances, field-wrapper agreement, fixed-data invariance, and
+reference/data representation-floor behavior are certificate-bound.
 
 ## Random-feature model realizations
 

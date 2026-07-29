@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import math
 from pathlib import Path
 from typing import Annotated, Literal, Union
 
@@ -88,6 +88,12 @@ class BurgersSystemSpec(StrictModel):
     def _solver_fields(self) -> "BurgersSystemSpec":
         if self.solver in {"split_step", "semi_implicit"} and self.fine_dt is None:
             raise ValueError("split-step Burgers requires fine_dt")
+        if (
+            self.solver
+            in {"etdrk4", "fourier_pseudospectral_etdrk4"}
+            and self.fine_dt is not None
+        ):
+            raise ValueError("ETDRK4 Burgers requires fine_dt=null")
         if self.advection_coefficient != 1.0:
             raise ValueError(
                 "the current Burgers kernel supports advection_coefficient=1.0 only"
@@ -106,6 +112,17 @@ class ReactionDiffusionSystemSpec(StrictModel):
     dt: PositiveFloat
     nonlinear_filter: Literal["none", "two_thirds"] = "two_thirds"
 
+    @model_validator(mode="after")
+    def _finite_parameters(self) -> "ReactionDiffusionSystemSpec":
+        if not all(
+            math.isfinite(float(value))
+            for value in (self.nu, self.alpha, self.beta, self.dt)
+        ):
+            raise ValueError(
+                "reaction-diffusion parameters and dt must be finite"
+            )
+        return self
+
 
 SystemSpec = Annotated[
     Union[HeatSystemSpec, BurgersSystemSpec, ReactionDiffusionSystemSpec],
@@ -119,6 +136,8 @@ class EvolutionSpec(StrictModel):
 
     @model_validator(mode="after")
     def _alignment(self) -> "EvolutionSpec":
+        if not math.isfinite(float(self.time)):
+            raise ValueError("evolution time must be finite")
         dt = getattr(self.system, "dt", None)
         if dt is not None:
             steps = round(self.time / dt)
@@ -139,6 +158,26 @@ class BurgersTimeCandidateSpec(StrictModel):
     def _fine_dt(self) -> "BurgersTimeCandidateSpec":
         if self.solver in {"split_step", "semi_implicit"} and self.fine_dt is None:
             raise ValueError("split-step candidate requires fine_dt")
+        if (
+            self.solver
+            in {"etdrk4", "fourier_pseudospectral_etdrk4"}
+            and self.fine_dt is not None
+        ):
+            raise ValueError("ETDRK4 candidate requires fine_dt=null")
+        return self
+
+
+class ReactionDiffusionTimeCandidateSpec(StrictModel):
+    dt: PositiveFloat
+    solver: Literal["semi_implicit_spectral_euler"] = (
+        "semi_implicit_spectral_euler"
+    )
+    nonlinear_filter: Literal["none", "two_thirds"] = "two_thirds"
+
+    @model_validator(mode="after")
+    def _finite_dt(self) -> "ReactionDiffusionTimeCandidateSpec":
+        if not math.isfinite(float(self.dt)):
+            raise ValueError("reaction-diffusion candidate dt must be finite")
         return self
 
 
@@ -146,6 +185,73 @@ class ReferenceToleranceSpec(StrictModel):
     mean_relative_l2: float = Field(ge=0)
     max_relative_l2: float = Field(ge=0)
     low_mode_relative_l2: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _finite(self) -> "ReferenceToleranceSpec":
+        if not all(
+            math.isfinite(value)
+            for value in (
+                self.mean_relative_l2,
+                self.max_relative_l2,
+                self.low_mode_relative_l2,
+            )
+        ):
+            raise ValueError("reference tolerances must be finite")
+        return self
+
+
+class BurgersCrossSolverContextSpec(StrictModel):
+    system_kind: Literal["burgers"] = "burgers"
+    nu: PositiveFloat
+    advection_coefficient: float = 1.0
+    final_time: PositiveFloat
+    domain_length: PositiveFloat
+    dtype: Literal["float32", "float64"]
+    dealias: bool
+
+    @model_validator(mode="after")
+    def _supported_advection(self) -> "BurgersCrossSolverContextSpec":
+        if self.advection_coefficient != 1.0:
+            raise ValueError(
+                "the current Burgers kernel supports "
+                "advection_coefficient=1.0 only"
+            )
+        return self
+
+
+class BurgersCrossSolverFamilySpec(StrictModel):
+    candidates: tuple[BurgersTimeCandidateSpec, ...]
+
+
+class BurgersCrossSolverFamiliesSpec(StrictModel):
+    split_step: BurgersCrossSolverFamilySpec
+    etdrk4: BurgersCrossSolverFamilySpec
+
+
+class DisabledBurgersCrossSolverValidationSpec(StrictModel):
+    schema_version: Literal["pol-burgers-cross-solver-spec-v1"] = (
+        "pol-burgers-cross-solver-spec-v1"
+    )
+    enabled: Literal[False] = False
+
+
+class EnabledBurgersCrossSolverValidationSpec(StrictModel):
+    schema_version: Literal["pol-burgers-cross-solver-spec-v1"] = (
+        "pol-burgers-cross-solver-spec-v1"
+    )
+    enabled: Literal[True]
+    context: BurgersCrossSolverContextSpec
+    solvers: BurgersCrossSolverFamiliesSpec
+    tolerances: ReferenceToleranceSpec
+
+
+BurgersCrossSolverValidationSpec = Annotated[
+    Union[
+        DisabledBurgersCrossSolverValidationSpec,
+        EnabledBurgersCrossSolverValidationSpec,
+    ],
+    Field(discriminator="enabled"),
+]
 
 
 class AlgebraicToleranceSpec(StrictModel):
@@ -183,34 +289,18 @@ class ReducedObservationSpec(StrictModel):
         return self
 
 
-class ValidationSpec(StrictModel):
-    schema_version: Literal["pol-validation-v3"] = "pol-validation-v3"
-    name: str
-    artifact_root: Path = Path("artifacts")
-    profile: str = "smoke"
-    domain: DomainSpec
-    samples: SampleSpec
+class TargetReferenceValidationBase(StrictModel):
     reference_evolution: EvolutionSpec
     calibration_sample_ids: tuple[int, ...]
     reference_nx_candidates: tuple[PositiveInt, ...]
-    time_candidates: tuple[BurgersTimeCandidateSpec, ...]
     q_reference_check: PositiveInt
     reference_tolerances: ReferenceToleranceSpec
-    algebraic_tolerances: AlgebraicToleranceSpec = Field(
-        default_factory=AlgebraicToleranceSpec
-    )
-    full_interface: InterfaceDimensionsSpec
-    reduced_observation: ReducedObservationSpec
     selection_policy: Literal["coarsest_passing_with_finest_pair_required"] = (
         "coarsest_passing_with_finest_pair_required"
     )
 
     @model_validator(mode="after")
-    def _validation_constraints(self) -> "ValidationSpec":
-        if self.reference_evolution.system.kind != "burgers":
-            raise ValueError(
-                "reference convergence currently supports a Burgers evolution"
-            )
+    def _reference_constraints(self) -> "TargetReferenceValidationBase":
         if len(self.reference_nx_candidates) < 2:
             raise ValueError("at least two reference_nx_candidates are required")
         if tuple(sorted(set(self.reference_nx_candidates))) != tuple(
@@ -219,46 +309,223 @@ class ValidationSpec(StrictModel):
             raise ValueError(
                 "reference_nx_candidates must be strictly increasing and unique"
             )
-        if len(self.time_candidates) < 2:
-            raise ValueError("at least two time_candidates are required")
-        serialized_time_candidates = tuple(
-            json.dumps(candidate.model_dump(mode="json"), sort_keys=True)
-            for candidate in self.time_candidates
-        )
-        if len(set(serialized_time_candidates)) != len(serialized_time_candidates):
-            raise ValueError("time_candidates must be unique")
-        reference_time_candidate = {
-            "dt": self.reference_evolution.system.dt,
-            "fine_dt": self.reference_evolution.system.fine_dt,
-            "solver": self.reference_evolution.system.solver,
-            "dealias": self.reference_evolution.system.dealias,
-        }
-        if reference_time_candidate != self.time_candidates[-1].model_dump(
-            mode="json"
-        ):
-            raise ValueError(
-                "reference_evolution time discretization must equal the finest "
-                "time_candidates entry"
-            )
         if not self.calibration_sample_ids:
             raise ValueError("calibration_sample_ids must not be empty")
-        if len(set(self.calibration_sample_ids)) != len(self.calibration_sample_ids):
-            raise ValueError("calibration_sample_ids must be unique")
-        if any(
-            i < 0 or i >= self.samples.total_samples
-            for i in self.calibration_sample_ids
+        if len(set(self.calibration_sample_ids)) != len(
+            self.calibration_sample_ids
         ):
-            raise ValueError("calibration_sample_ids must lie in the dataset range")
+            raise ValueError("calibration_sample_ids must be unique")
         if self.q_reference_check % 2 == 0:
             raise ValueError("q_reference_check must be odd")
         if self.q_reference_check > min(self.reference_nx_candidates):
-            raise ValueError("q_reference_check must be <= the coarsest reference nx")
-        if self.full_interface.n_tar > max(self.reference_nx_candidates):
+            raise ValueError(
+                "q_reference_check must be <= the coarsest reference nx"
+            )
+        return self
+
+
+class BurgersConvergenceReferenceSpec(TargetReferenceValidationBase):
+    kind: Literal["burgers_convergence"] = "burgers_convergence"
+    time_candidates: tuple[BurgersTimeCandidateSpec, ...]
+    cross_solver_validation: BurgersCrossSolverValidationSpec = Field(
+        default_factory=DisabledBurgersCrossSolverValidationSpec
+    )
+
+    @model_validator(mode="after")
+    def _burgers_constraints(self) -> "BurgersConvergenceReferenceSpec":
+        if self.reference_evolution.system.kind != "burgers":
+            raise ValueError(
+                "burgers_convergence requires a Burgers reference evolution"
+            )
+        if len(self.time_candidates) < 2:
+            raise ValueError("at least two time_candidates are required")
+        from pol.validation.conditions import (
+            burgers_refinement_proof,
+            canonical_numerical_condition,
+        )
+
+        evolution_time = float(self.reference_evolution.time)
+        proof = burgers_refinement_proof(
+            [
+                candidate.model_dump(mode="json")
+                for candidate in self.time_candidates
+            ],
+            evolution_time=evolution_time,
+        )
+        system = self.reference_evolution.system
+        reference_time_condition = canonical_numerical_condition(
+            "burgers",
+            system.model_dump(mode="json"),
+            evolution_time=evolution_time,
+        )
+        if reference_time_condition != proof["ordered_candidates"][-1]:
+            raise ValueError(
+                "reference_evolution time discretization must equal the finest "
+                "canonical time_candidates condition"
+            )
+        diagnostic = self.cross_solver_validation
+        if diagnostic.enabled:
+            context = diagnostic.context
+            if (
+                context.system_kind != system.kind
+                or float(context.nu) != float(system.nu)
+                or float(context.advection_coefficient)
+                != float(system.advection_coefficient)
+                or float(context.final_time) != evolution_time
+            ):
+                raise ValueError(
+                    "cross-solver PDE parameters and final time must exactly "
+                    "match reference_evolution"
+                )
+            if context.dealias != reference_time_condition["dealias"]:
+                raise ValueError(
+                    "cross-solver dealias policy must exactly match the "
+                    "primary reference evolution"
+                )
+            for family_name in ("split_step", "etdrk4"):
+                family_spec = getattr(diagnostic.solvers, family_name)
+                family_proof = burgers_refinement_proof(
+                    [
+                        candidate.model_dump(mode="json")
+                        for candidate in family_spec.candidates
+                    ],
+                    evolution_time=evolution_time,
+                )
+                if family_proof["canonical_solver_family"] != family_name:
+                    raise ValueError(
+                        "cross-solver candidate sequence is assigned to the "
+                        f"wrong solver family: expected {family_name}"
+                    )
+                if family_proof["dealias"] != context.dealias:
+                    raise ValueError(
+                        "cross-solver candidate dealias policy must exactly "
+                        "match the diagnostic context"
+                    )
+        return self
+
+
+class HeatAnalyticReferenceSpec(TargetReferenceValidationBase):
+    kind: Literal["heat_analytic"] = "heat_analytic"
+
+    @model_validator(mode="after")
+    def _heat_constraints(self) -> "HeatAnalyticReferenceSpec":
+        if self.reference_evolution.system.kind != "heat":
+            raise ValueError(
+                "heat_analytic requires a heat reference evolution"
+            )
+        return self
+
+
+class ReactionDiffusionConvergenceReferenceSpec(
+    TargetReferenceValidationBase
+):
+    kind: Literal["reaction_diffusion_convergence"] = (
+        "reaction_diffusion_convergence"
+    )
+    time_candidates: tuple[ReactionDiffusionTimeCandidateSpec, ...]
+
+    @model_validator(mode="after")
+    def _reaction_diffusion_constraints(
+        self,
+    ) -> "ReactionDiffusionConvergenceReferenceSpec":
+        if self.reference_evolution.system.kind != "reaction_diffusion":
+            raise ValueError(
+                "reaction_diffusion_convergence requires a "
+                "reaction-diffusion reference evolution"
+            )
+        if len(self.time_candidates) < 2:
+            raise ValueError("at least two time_candidates are required")
+        from pol.validation.conditions import (
+            canonical_numerical_condition,
+            reaction_diffusion_refinement_proof,
+        )
+
+        evolution_time = float(self.reference_evolution.time)
+        proof = reaction_diffusion_refinement_proof(
+            [
+                candidate.model_dump(mode="json")
+                for candidate in self.time_candidates
+            ],
+            evolution_time=evolution_time,
+        )
+        system = self.reference_evolution.system
+        reference_condition = canonical_numerical_condition(
+            "reaction_diffusion",
+            system.model_dump(mode="json"),
+            evolution_time=evolution_time,
+        )
+        if reference_condition != proof["ordered_candidates"][-1]:
+            raise ValueError(
+                "reference_evolution time discretization must equal the "
+                "finest canonical time_candidates condition"
+            )
+        return self
+
+
+TargetReferenceValidationSpec = Annotated[
+    Union[
+        BurgersConvergenceReferenceSpec,
+        HeatAnalyticReferenceSpec,
+        ReactionDiffusionConvergenceReferenceSpec,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+class ValidationSpec(StrictModel):
+    schema_version: Literal["pol-validation-v5", "pol-validation-v6"] = (
+        "pol-validation-v6"
+    )
+    name: str
+    artifact_root: Path = Path("artifacts")
+    profile: str = "smoke"
+    domain: DomainSpec
+    samples: SampleSpec
+    target_reference: TargetReferenceValidationSpec
+    algebraic_tolerances: AlgebraicToleranceSpec = Field(
+        default_factory=AlgebraicToleranceSpec
+    )
+    full_interface: InterfaceDimensionsSpec
+    reduced_observation: ReducedObservationSpec
+
+    @model_validator(mode="after")
+    def _validation_constraints(self) -> "ValidationSpec":
+        target = self.target_reference
+        if (
+            isinstance(
+                target,
+                ReactionDiffusionConvergenceReferenceSpec,
+            )
+            and self.schema_version != "pol-validation-v6"
+        ):
+            raise ValueError(
+                "reaction_diffusion_convergence requires "
+                "schema_version=pol-validation-v6"
+            )
+        if any(
+            i < 0 or i >= self.samples.total_samples
+            for i in target.calibration_sample_ids
+        ):
+            raise ValueError("calibration_sample_ids must lie in the dataset range")
+        if self.full_interface.n_tar > max(target.reference_nx_candidates):
             raise ValueError("full_interface.n_tar exceeds the master resolution")
         if self.reduced_observation.J > self.full_interface.n_sur:
             raise ValueError("reduced observation J must be <= full n_sur")
         if self.reduced_observation.q > self.full_interface.n_tar:
             raise ValueError("reduced observation q must be <= full n_tar")
+        if (
+            isinstance(target, BurgersConvergenceReferenceSpec)
+            and target.cross_solver_validation.enabled
+        ):
+            context = target.cross_solver_validation.context
+            if (
+                float(context.domain_length) != float(self.domain.length)
+                or context.dtype != self.samples.dtype
+            ):
+                raise ValueError(
+                    "cross-solver domain length and dtype must exactly match "
+                    "the validation context"
+                )
         return self
 
 
@@ -285,7 +552,7 @@ DatasetBindingSpec = Annotated[
 
 
 class DatasetSpec(StrictModel):
-    schema_version: Literal["pol-dataset-v2"] = "pol-dataset-v2"
+    schema_version: Literal["pol-dataset-v3"] = "pol-dataset-v3"
     name: str
     artifact_root: Path = Path("artifacts")
     validation_spec: Path

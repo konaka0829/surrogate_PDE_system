@@ -17,16 +17,52 @@ def normalize_solver_name(solver: str) -> str:
     raise ValueError(f"unsupported Burgers solver: {solver}")
 
 
-def step_metadata(*, solver: str, dt: float, fine_dt: float | None) -> tuple[float, int]:
-    if dt <= 0:
-        raise ValueError("dt must be positive")
+def step_metadata(
+    *,
+    solver: str,
+    dt: float,
+    fine_dt: float | None,
+    final_time: float,
+) -> dict[str, object]:
+    """Return the canonical step condition actually used by a Burgers solve."""
+    if not math.isfinite(dt) or dt <= 0:
+        raise ValueError("dt must be positive and finite")
+    if not math.isfinite(final_time) or final_time <= 0:
+        raise ValueError("final_time must be positive and finite")
     normalized = normalize_solver_name(solver)
+    outer_step_count = int(round(final_time / dt))
+    if (
+        outer_step_count < 1
+        or abs(outer_step_count * dt - final_time)
+        > 1e-10 * max(1.0, abs(final_time))
+    ):
+        raise ValueError(
+            f"final_time={final_time} must align with requested outer dt={dt}"
+        )
     if normalized == "etdrk4":
-        return float(dt), 1
-    if fine_dt is None or fine_dt <= 0:
-        raise ValueError("split_step requires positive fine_dt")
-    substeps = max(1, int(math.ceil(dt / fine_dt)))
-    return float(dt) / substeps, substeps
+        if fine_dt is not None:
+            raise ValueError("ETDRK4 requires fine_dt=null")
+        substeps_per_outer = 1
+        effective_substep = float(dt)
+    else:
+        if (
+            fine_dt is None
+            or not math.isfinite(fine_dt)
+            or fine_dt <= 0
+        ):
+            raise ValueError("split_step requires positive finite fine_dt")
+        substeps_per_outer = max(1, int(math.ceil(dt / fine_dt)))
+        effective_substep = float(dt) / substeps_per_outer
+    return {
+        "solver": normalized,
+        "requested_outer_dt": float(dt),
+        "requested_fine_dt": (
+            None if fine_dt is None else float(fine_dt)
+        ),
+        "outer_step_count": outer_step_count,
+        "effective_substep": effective_substep,
+        "substeps_per_outer": substeps_per_outer,
+    }
 
 
 @dataclass(frozen=True)
@@ -60,11 +96,14 @@ def solve_burgers(
         raise ValueError("u0 must be real with shape (batch, nx)")
     if nu <= 0 or time <= 0 or dt <= 0 or domain_length <= 0:
         raise ValueError("nu, time, dt, and domain_length must be positive")
-    steps = int(round(time / dt))
-    if abs(steps * dt - time) > 1e-10 * max(1.0, abs(time)):
-        raise ValueError(f"time={time} must align with dt={dt}")
-    normalized = normalize_solver_name(solver)
-    effective, substeps = step_metadata(solver=solver, dt=dt, fine_dt=fine_dt)
+    steps = step_metadata(
+        solver=solver,
+        dt=dt,
+        fine_dt=fine_dt,
+        final_time=time,
+    )
+    normalized = str(steps["solver"])
+    outer_step_count = int(steps["outer_step_count"])
     if normalized == "etdrk4":
         values = simulate_burgers_etdrk4(
             u0,
@@ -80,7 +119,7 @@ def solve_burgers(
             u0,
             dt=dt,
             Tr=time,
-            obs_steps=[steps],
+            obs_steps=[outer_step_count],
             nu=nu,
             fine_dt=fine_dt,
             dealias=dealias,
@@ -93,11 +132,7 @@ def solve_burgers(
         "solver": normalized,
         "nu": float(nu),
         "time": float(time),
-        "requested_dt": float(dt),
-        "requested_fine_dt": None if fine_dt is None else float(fine_dt),
-        "effective_inner_step": float(effective),
-        "outer_steps": steps,
-        "substeps_per_outer": substeps,
+        **steps,
         "dealias": bool(dealias),
         "domain_length": float(domain_length),
         "dtype": str(u0.dtype).removeprefix("torch."),

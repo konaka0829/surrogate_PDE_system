@@ -25,7 +25,7 @@ def write_tiny_stack(
     validation_path = write_json(
         root / "validation.json",
         {
-            "schema_version": "pol-validation-v3",
+            "schema_version": "pol-validation-v5",
             "name": "tiny_foundation",
             "artifact_root": str(artifact_root),
             "profile": "test",
@@ -47,39 +47,42 @@ def write_tiny_stack(
                 },
                 "preprocessing": "l2_scaling_only",
             },
-            "reference_evolution": {
-                "system": {
-                    "kind": "burgers",
-                    "nu": 0.05,
-                    "advection_coefficient": 1.0,
-                    "solver": "split_step",
-                    "dt": 0.01,
-                    "fine_dt": 0.0025,
-                    "dealias": True,
+            "target_reference": {
+                "kind": "burgers_convergence",
+                "reference_evolution": {
+                    "system": {
+                        "kind": "burgers",
+                        "nu": 0.05,
+                        "advection_coefficient": 1.0,
+                        "solver": "split_step",
+                        "dt": 0.01,
+                        "fine_dt": 0.0025,
+                        "dealias": True,
+                    },
+                    "time": 0.02,
                 },
-                "time": 0.02,
-            },
-            "calibration_sample_ids": [0, 1],
-            "reference_nx_candidates": [16, 32],
-            "time_candidates": [
-                {
-                    "solver": "split_step",
-                    "dt": 0.01,
-                    "fine_dt": 0.005,
-                    "dealias": True,
+                "calibration_sample_ids": [0, 1],
+                "reference_nx_candidates": [16, 32],
+                "time_candidates": [
+                    {
+                        "solver": "split_step",
+                        "dt": 0.01,
+                        "fine_dt": 0.005,
+                        "dealias": True,
+                    },
+                    {
+                        "solver": "split_step",
+                        "dt": 0.01,
+                        "fine_dt": 0.0025,
+                        "dealias": True,
+                    },
+                ],
+                "q_reference_check": 9,
+                "reference_tolerances": {
+                    "mean_relative_l2": 1.0,
+                    "max_relative_l2": 1.0,
+                    "low_mode_relative_l2": 1.0,
                 },
-                {
-                    "solver": "split_step",
-                    "dt": 0.01,
-                    "fine_dt": 0.0025,
-                    "dealias": True,
-                },
-            ],
-            "q_reference_check": 9,
-            "reference_tolerances": {
-                "mean_relative_l2": 1.0,
-                "max_relative_l2": 1.0,
-                "low_mode_relative_l2": 1.0,
             },
             "full_interface": {"n_tar": 16, "n_sur": 32, "J": 32, "q": 9},
             "reduced_observation": {"J": 8, "q": 5},
@@ -89,7 +92,7 @@ def write_tiny_stack(
     dataset_path = write_json(
         root / "dataset.json",
         {
-            "schema_version": "pol-dataset-v2",
+            "schema_version": "pol-dataset-v3",
             "name": "tiny_heat_dataset",
             "artifact_root": str(artifact_root),
             "validation_spec": str(validation_path),
@@ -221,4 +224,30 @@ def write_tiny_stack(
             },
         },
     )
+    return validation_path, dataset_path, study_path
+
+
+def write_tiny_heat_stack(root: Path) -> tuple[Path, Path, Path]:
+    validation_path, dataset_path, study_path = write_tiny_stack(root)
+    validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    validation["name"] = "tiny_heat_validation"
+    validation["target_reference"] = {
+        "kind": "heat_analytic",
+        "reference_evolution": {
+            "system": {"kind": "heat", "nu": 0.1},
+            "time": 0.1,
+        },
+        "calibration_sample_ids": [0, 1],
+        "reference_nx_candidates": [16, 32],
+        "q_reference_check": 9,
+        "reference_tolerances": {
+            "mean_relative_l2": 1e-8,
+            "max_relative_l2": 1e-7,
+            "low_mode_relative_l2": 1e-9,
+        },
+    }
+    write_json(validation_path, validation)
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    dataset["binding"] = {"kind": "validated_reference"}
+    write_json(dataset_path, dataset)
     return validation_path, dataset_path, study_path
