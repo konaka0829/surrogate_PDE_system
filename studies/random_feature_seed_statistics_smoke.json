@@ -1,0 +1,171 @@
+{
+  "schema_version": "pol-study-v6",
+  "name": "random_feature_seed_statistics",
+  "output_root": "outputs/studies",
+  "artifact_root": "artifacts",
+  "profile": "smoke",
+  "dataset_spec": "configs/datasets/burgers_smoke.json",
+  "base_trial": {
+    "input": {"n_tar": 32, "resampling": "spectral"},
+    "feature": {
+      "kind": "pde_dynamics",
+      "evolution": {
+        "system": {
+          "kind": "burgers",
+          "nu": 0.01,
+          "advection_coefficient": 1.0,
+          "solver": "split_step",
+          "dt": 0.01,
+          "fine_dt": 0.0025,
+          "dealias": true
+        },
+        "time": 0.02
+      },
+      "n_sur": 64,
+      "observation": {
+        "kind": "equispaced_points",
+        "J": 16,
+        "l2_scale": true
+      }
+    },
+    "output": {"kind": "real_fourier", "q": 17},
+    "readouts": [
+      {
+        "id": "affine",
+        "kind": "affine_ridge",
+        "display_name": "Deterministic affine reference",
+        "zetas": [0.0, 1e-12, 1e-8],
+        "tie_tolerance": 1e-12,
+        "tie_break": "largest_zeta",
+        "svd_rcond": null
+      },
+      {
+        "id": "random",
+        "kind": "random_feature_ridge",
+        "display_name": "Random-feature ridge",
+        "activation": "tanh",
+        "widths": [4, 8],
+        "weight_scales": [0.5, 1.0],
+        "bias_scales": [0.0, 0.1],
+        "selection_seeds": [101, 102],
+        "evaluation_seeds": [201, 202, 203],
+        "zetas": [0.0, 1e-8],
+        "tie_tolerance": 1e-12,
+        "svd_rcond": null
+      }
+    ]
+  },
+  "variants": [
+    {
+      "id": "burgers",
+      "display_name": "Phase-3-selected Burgers dynamic features",
+      "selection_source": {
+        "kind": "completed_study_selection",
+        "source_study_spec": "studies/surrogate_parameter_time_landscape_smoke.json",
+        "source_variant_id": "burgers",
+        "source_readout_id": "affine",
+        "import_paths": [
+          "feature.evolution.system",
+          "feature.evolution.time"
+        ]
+      },
+      "overrides": {},
+      "search": {"kind": "static"}
+    }
+  ],
+  "global_axes": [],
+  "prediction_capture": {
+    "kind": "predeclared_test_predictions",
+    "sample_ids": [6, 21],
+    "sample_selection_policy": "predeclared_test_ids",
+    "readout_ids": ["affine", "random"],
+    "random_feature_members": {
+      "kind": "explicit_seeds",
+      "seeds": [201]
+    },
+    "include_ensemble": true
+  },
+  "selection": {
+    "metric": "validation_field_relative_l2_mean",
+    "tie_tolerance": 1e-12,
+    "tie_break": "first_in_config_order",
+    "representative_readout": "random",
+    "freeze_before_test": true
+  },
+  "convergence": null,
+  "diagnostics": [
+    {
+      "kind": "readout_stability_noise",
+      "levels": [0.0],
+      "repeats": 2,
+      "seed": 7201,
+      "scaling": {"kind": "relative_global_feature_rms"},
+      "common_random_numbers": true,
+      "include_prediction_ensemble": true,
+      "covariance_rcond": 1e-12
+    }
+  ],
+  "reporters": [
+    {
+      "kind": "random_feature_seed_distribution",
+      "filename": "test_seed_scatter",
+      "plot": "scatter",
+      "metric": "test_field_relative_l2_mean",
+      "group_by": ["variant_id", "readout_id"],
+      "yscale": "log",
+      "formats": ["png"],
+      "dpi": 100
+    },
+    {
+      "kind": "random_feature_seed_distribution",
+      "filename": "test_seed_box",
+      "plot": "box",
+      "metric": "test_field_relative_l2_mean",
+      "group_by": ["variant_id", "readout_id"],
+      "yscale": "log",
+      "formats": ["png"],
+      "dpi": 100
+    },
+    {
+      "kind": "random_feature_seed_distribution",
+      "filename": "test_seed_empirical_cdf",
+      "plot": "empirical_cdf",
+      "metric": "test_field_relative_l2_mean",
+      "group_by": ["variant_id", "readout_id"],
+      "yscale": "log",
+      "formats": ["png"],
+      "dpi": 100
+    },
+    {
+      "kind": "representative_prediction_fields",
+      "filename": "representative_prediction_fields",
+      "formats": ["png"],
+      "dpi": 100
+    },
+    {
+      "kind": "fourier_error_spectra",
+      "filename": "fourier_error_spectra_mse",
+      "metric": "per_mode_squared_error_sample_mean",
+      "x_axis": "mode_index",
+      "yscale": "log",
+      "formats": ["png"],
+      "dpi": 100
+    },
+    {
+      "kind": "fourier_error_spectra",
+      "filename": "fourier_error_spectra_relative",
+      "metric": "per_mode_relative_energy_error",
+      "x_axis": "physical_wavenumber",
+      "yscale": "log",
+      "formats": ["png"],
+      "dpi": 100
+    }
+  ],
+  "execution": {
+    "torch_threads": 1,
+    "batch_size": 3,
+    "invalid_trial_policy": "error",
+    "cache_states": true,
+    "generate_plots": true
+  }
+}

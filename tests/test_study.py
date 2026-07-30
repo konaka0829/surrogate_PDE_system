@@ -113,14 +113,14 @@ def test_global_axis_uses_same_study_executor(tmp_path: Path) -> None:
     assert plan["case_count"] == 2
     assert {case["global_values"]["output.q"] for case in plan["cases"]} == {5, 9}
     assert stable_object_hash(plan) == (
-        "4d5c2602acbd1f6172b84f9197f357951d736c47ef90e4e492182b05d873d342"
+        "5e07587b365661cc1f9860bb0ea5a623a8ebf5da53871b14a5a8f950b16a1c25"
     )
 
 
-def test_checked_in_observation_output_plan_keeps_q_greater_than_J_cells() -> None:
+def test_checked_in_observation_output_budget_keeps_q_greater_than_J_cells() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     spec = load_study_spec(
-        repo_root / "studies" / "observation_output_map_smoke.json",
+        repo_root / "studies" / "observation_output_budget_smoke.json",
         repo_root=repo_root,
     )
     plan = plan_study(spec)
@@ -131,8 +131,8 @@ def test_checked_in_observation_output_plan_keeps_q_greater_than_J_cells() -> No
         )
         for case in plan["cases"]
     }
-    assert plan["case_count"] == 9
-    assert (8, 17) in cells
+    assert plan["case_count"] == 8
+    assert (4, 9) in cells
     assert any(q > J for J, q in cells)
 
 
@@ -189,7 +189,7 @@ def test_direct_decoder_diagnostic_is_bound_across_study_artifacts(
         map_location="cpu",
         weights_only=True,
     )
-    assert archive["schema_version"] == "pol-frozen-model-archive-v5"
+    assert archive["schema_version"] == "pol-frozen-model-archive-v9"
     entries = {
         entry["readout_id"]: entry for entry in archive["models"].values()
     }

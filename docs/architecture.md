@@ -12,10 +12,8 @@ systems
 validation ──→ validated initial-condition certificate
       ↓
 data       ──→ content-addressed target dataset
-      ↓
-learning + study
-      ↓
-plotting and publication-level study specifications
+  ├──→ learning + study ──→ plotting/reporting
+  └──→ digital_baselines ──→ independent neural-operator run
 ```
 
 `validation` and `study` are siblings in purpose: validation establishes that
@@ -23,6 +21,11 @@ numerical and algebraic assumptions are trustworthy; a study performs
 operator-learning selection and evaluation. Dataset construction does not
 import a numbered validation experiment, and the prediction path does not
 contain validation-specific branches.
+
+The digital baseline consumes validated data and shared learning metrics but
+is not a `StudyRunner` readout. `pol.study` does not import
+`pol.digital_baselines`; the adapter may read an already verified physical
+study only through the read-only completed-run boundary.
 
 Validation keeps one runner and one CLI path. `ValidationSpec.target_reference`
 is a strict semantic union: common foundation and calibration isolation are
@@ -183,6 +186,11 @@ Publication uses a sibling staging directory. The staging tree is validated
 before an atomic directory replacement. If publication fails, a previously
 valid destination is restored.
 
+The digital adapter follows the same transaction rule but owns separate
+strict configuration, identity, selection, checkpoint, frozen-plan, summary,
+and manifest schemas. Its selection/checkpoint/plan records are read back
+before its sole test finite-view boundary.
+
 ## 7. Extension points
 
 ### New evolution system
@@ -214,3 +222,11 @@ For dimensional studies, keep the scientific questions separated:
 - `J × q` varies observation and output budgets at fixed `n_tar, n_sur`;
 - `n_tar × n_sur` varies finite-data and surrogate discretization at fixed
   `J, q`.
+
+### New digital neural-operator family
+
+Add it under `pol.digital_baselines` only when its optimization/checkpoint
+lifecycle differs materially from fixed physical features. Reuse the
+validated dataset, canonical split, finite-input constructor, and shared
+metrics. Do not register it as a physical readout and do not add a dependency
+from `pol.study` back to the digital adapter.

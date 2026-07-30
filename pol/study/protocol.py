@@ -21,7 +21,7 @@ from pol.runtime.device import (
 from pol.runtime.hashing import stable_object_hash, tensor_sha256
 from pol.runtime.io import atomic_torch_save, file_sha256, write_strict_json
 from .cases import StudyCase
-from .evaluation import CandidateEvaluation
+from .evaluation import CandidateEvaluation, trial_parameters
 
 if TYPE_CHECKING:
     from .search import SearchOutcome
@@ -49,13 +49,26 @@ class PersistedFreeze:
 
 def test_evaluation_contract() -> dict[str, Any]:
     return {
-        "schema_version": "pol-test-evaluation-contract-v1",
+        "schema_version": "pol-test-evaluation-contract-v3",
         "random_feature_primary": "independent_seed_metric_summary",
         "random_feature_seed_result": "independent_seed_realization",
         "random_feature_ensemble_result": "prediction_ensemble",
         "seed_standard_deviation_ddof": 1,
         "confidence_level": 0.95,
         "confidence_interval_method": "student_t",
+        "descriptive_quantiles": [0.25, 0.5, 0.75],
+        "quantile_method": "linear",
+        "quantiles_are_uncertainty_interval": False,
+        "evaluation_seed_validation_used_for_selection": False,
+        "random_map_identity": "content_hash_of_seed_A_c_and_map_contract",
+        "frozen_member_identity": "content_hash_of_map_and_fitted_readout",
+        "prediction_ensemble_member_binding": (
+            "ordered_seed_and_frozen_member_hashes"
+        ),
+        "training_subset_policy": "canonical_train_order_prefix_v1",
+        "training_subset_selection_boundary": (
+            "all_subset_models_frozen_before_any_test_access"
+        ),
     }
 
 
@@ -86,6 +99,25 @@ def assert_selection_record_safe(record: Mapping[str, Any]) -> None:
                 visit(item, f"{path}[{index}]")
 
     visit(record, "$")
+
+
+def verify_selection_source_provenance_bindings(
+    *,
+    selection: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    archive: Mapping[str, Any],
+) -> None:
+    provenance = selection.get("selection_source_provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("selection-source provenance must be an object")
+    if plan.get("selection_source_provenance") != provenance:
+        raise ValueError(
+            "frozen plan selection-source provenance mismatch"
+        )
+    if archive.get("selection_source_provenance") != provenance:
+        raise ValueError(
+            "frozen model archive selection-source provenance mismatch"
+        )
 
 
 def _model_key(case_id: str, candidate_id: str, readout_id: str) -> str:
@@ -199,6 +231,67 @@ def verify_frozen_decoder_bindings(
     return direct_count, zero_fill_count
 
 
+def verify_representative_feature_bindings(
+    models: Mapping[str, Any],
+    *,
+    selection: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> None:
+    selection_cases = selection.get("cases")
+    plan_cases = plan.get("cases")
+    if not isinstance(selection_cases, Mapping) or not isinstance(
+        plan_cases,
+        Mapping,
+    ):
+        raise ValueError("representative feature binding requires cases")
+    entries = {
+        (
+            entry.get("case_id"),
+            entry.get("readout_id"),
+            entry.get("candidate_id"),
+        ): entry
+        for entry in models.values()
+        if isinstance(entry, Mapping)
+    }
+    for case_id, selection_case in selection_cases.items():
+        if not isinstance(selection_case, Mapping):
+            raise ValueError("representative selection case is invalid")
+        readout_id = selection_case.get("representative_readout")
+        candidate_id = selection_case.get("representative_candidate_id")
+        entry = entries.get((case_id, readout_id, candidate_id))
+        condition = selection_case.get("representative_feature_condition")
+        if not isinstance(entry, Mapping) or not isinstance(condition, Mapping):
+            raise ValueError("representative frozen model binding is missing")
+        trial = TrialSpec.model_validate(entry["trial"])
+        expected = {
+            "selection_split": "validation",
+            "selection_metric": selection["selection_metric"],
+            "selection_metric_value": selection_case["validation_metrics"][
+                readout_id
+            ],
+            "representative_readout": readout_id,
+            "candidate_id": candidate_id,
+            "finite_input": trial.input.model_dump(mode="json"),
+            "feature": trial.feature.model_dump(mode="json"),
+            "output": trial.output.model_dump(mode="json"),
+            "row_parameters": trial_parameters(trial),
+        }
+        if "training_subset" in entry:
+            expected["training_subset"] = entry["training_subset"]
+        if condition != expected:
+            raise ValueError(
+                "representative feature condition differs from frozen trial"
+            )
+        plan_case = plan_cases.get(case_id)
+        if (
+            not isinstance(plan_case, Mapping)
+            or plan_case.get("representative_feature_condition") != condition
+        ):
+            raise ValueError(
+                "frozen plan representative feature binding mismatch"
+            )
+
+
 def build_selection_cases(
     *,
     spec: StudySpec,
@@ -212,12 +305,75 @@ def build_selection_cases(
         representative_id = outcome.selected_by_readout[
             spec.selection.representative_readout
         ]
+        representative_evaluation = evaluations[
+            (case.case_id, representative_id)
+        ]
+        if any(
+            candidate_id not in outcome.candidate_order
+            for candidate_id in outcome.selected_by_readout.values()
+        ):
+            raise ValueError("selected candidate is absent from candidate order")
+        if outcome.search_kind == "grid":
+            if outcome.planned_cartesian_cell_count != len(
+                outcome.grid_cells
+            ):
+                raise ValueError(
+                    "grid search did not preserve every declared Cartesian cell"
+                )
+            if (
+                len(outcome.evaluations) + len(outcome.skipped)
+                != outcome.planned_cartesian_cell_count
+            ):
+                raise ValueError(
+                    "evaluated and skipped grid cells do not cover the plan"
+                )
+        representative_condition = {
+            "selection_split": "validation",
+            "selection_metric": spec.selection.metric,
+            "selection_metric_value": representative_evaluation.rows[
+                spec.selection.representative_readout
+            ][spec.selection.metric],
+            "representative_readout": spec.selection.representative_readout,
+            "candidate_id": representative_id,
+            "finite_input": representative_evaluation.trial.input.model_dump(
+                mode="json"
+            ),
+            "feature": representative_evaluation.trial.feature.model_dump(
+                mode="json"
+            ),
+            "output": representative_evaluation.trial.output.model_dump(
+                mode="json"
+            ),
+            "row_parameters": trial_parameters(
+                representative_evaluation.trial
+            ),
+            "training_subset": dict(
+                representative_evaluation.training_subset
+            ),
+        }
         selection_cases[case.case_id] = {
             "variant_id": case.variant_id,
             "global_values": case.global_values,
+            "search_kind": outcome.search_kind,
+            "declared_candidate_count": outcome.declared_candidate_count,
+            "planned_cartesian_cell_count": (
+                outcome.planned_cartesian_cell_count
+            ),
+            "evaluated_candidate_count": len(outcome.evaluations),
+            "skipped_candidate_count": len(outcome.skipped),
+            "candidate_order": list(outcome.candidate_order),
+            "selection_order_by_readout": {
+                readout_id: list(candidate_ids)
+                for readout_id, candidate_ids in (
+                    outcome.selection_order_by_readout.items()
+                )
+            },
+            "grid_cells": list(outcome.grid_cells),
+            "skipped_candidates": list(outcome.skipped),
             "selected_by_readout": outcome.selected_by_readout,
             "representative_readout": spec.selection.representative_readout,
             "representative_candidate_id": representative_id,
+            "representative_feature_condition": representative_condition,
             "inner_selections": {
                 readout_id: evaluations[(case.case_id, candidate_id)]
                 .inner_selections[readout_id]
@@ -227,6 +383,14 @@ def build_selection_cases(
                 readout_id: evaluations[(case.case_id, candidate_id)].rows[
                     readout_id
                 ][spec.selection.metric]
+                for readout_id, candidate_id in outcome.selected_by_readout.items()
+            },
+            "training_subsets_by_readout": {
+                readout_id: dict(
+                    evaluations[
+                        (case.case_id, candidate_id)
+                    ].training_subset
+                )
                 for readout_id, candidate_id in outcome.selected_by_readout.items()
             },
         }
@@ -241,6 +405,7 @@ def prepare_freeze(
     outcomes: Mapping[str, SearchOutcome],
     evaluations: Mapping[tuple[str, str], CandidateEvaluation],
     convergence_statuses: Mapping[str, str],
+    selection_source_provenance: Mapping[str, Mapping[str, Any]],
 ) -> FreezePreparation:
     selection_cases = build_selection_cases(
         spec=spec,
@@ -249,7 +414,7 @@ def prepare_freeze(
         evaluations=evaluations,
     )
     selection_record = {
-        "schema_version": "pol-selection-record-v5",
+        "schema_version": "pol-selection-record-v8",
         **execution_device_policy(),
         "study": spec.name,
         "profile": spec.profile,
@@ -266,6 +431,10 @@ def prepare_freeze(
             "validation_ids_hash": tensor_sha256(dataset.validation_ids),
         },
         "selection_metric": spec.selection.metric,
+        "selection_source_provenance": {
+            key: dict(value)
+            for key, value in selection_source_provenance.items()
+        },
         "cases": selection_cases,
         "convergence": dict(convergence_statuses),
         "test_data_used": False,
@@ -285,12 +454,17 @@ def prepare_freeze(
                 "candidate_id": candidate_id,
                 "readout_id": readout_id,
                 "trial": evaluation.trial.model_dump(mode="python"),
+                "training_subset": dict(evaluation.training_subset),
                 "model": evaluation.frozen_models[readout_id],
             }
     frozen_archive = {
-        "schema_version": "pol-frozen-model-archive-v5",
+        "schema_version": "pol-frozen-model-archive-v9",
         **execution_device_policy(),
         "selection_record_hash": selection_hash,
+        "selection_source_provenance": {
+            key: dict(value)
+            for key, value in selection_source_provenance.items()
+        },
         "models": frozen_models,
     }
     require_cpu_tensors(
@@ -313,6 +487,7 @@ def persist_and_read_back_freeze(
     spec: StudySpec,
     dataset: Any,
     convergence_statuses: Mapping[str, str],
+    selection_source_provenance: Mapping[str, Mapping[str, Any]],
 ) -> PersistedFreeze:
     selection_hash = preparation.selection_hash
     write_strict_json(
@@ -332,7 +507,7 @@ def persist_and_read_back_freeze(
     atomic_torch_save(staging / "frozen_models.pt", preparation.frozen_archive)
     model_file_hash = file_sha256(staging / "frozen_models.pt")
     frozen_plan = {
-        "schema_version": "pol-frozen-evaluation-plan-v5",
+        "schema_version": "pol-frozen-evaluation-plan-v9",
         **execution_device_policy(),
         "study": spec.name,
         "dataset_artifact_id": dataset.artifact_id,
@@ -344,19 +519,49 @@ def persist_and_read_back_freeze(
         ),
         "dataset_binding_proof_hash": dataset.binding_proof_hash,
         "selection_record_hash": selection_hash,
+        "selection_source_provenance": {
+            key: dict(value)
+            for key, value in selection_source_provenance.items()
+        },
         "frozen_models_file": "frozen_models.pt",
         "frozen_models_sha256": model_file_hash,
         "cases": {
             case_id: {
                 "selected_by_readout": value["selected_by_readout"],
+                "search_kind": value["search_kind"],
+                "declared_candidate_count": value[
+                    "declared_candidate_count"
+                ],
+                "planned_cartesian_cell_count": value[
+                    "planned_cartesian_cell_count"
+                ],
+                "evaluated_candidate_count": value[
+                    "evaluated_candidate_count"
+                ],
+                "skipped_candidate_count": value[
+                    "skipped_candidate_count"
+                ],
+                "candidate_order": value["candidate_order"],
+                "selection_order_by_readout": value[
+                    "selection_order_by_readout"
+                ],
+                "representative_readout": value[
+                    "representative_readout"
+                ],
                 "representative_candidate_id": value[
                     "representative_candidate_id"
+                ],
+                "representative_feature_condition": value[
+                    "representative_feature_condition"
                 ],
                 "decoder_diagnostics_by_readout": {
                     readout_id: _decoder_diagnostic_fields(inner)
                     for readout_id, inner in value["inner_selections"].items()
                     if has_fixed_fourier_decoder_diagnostic(inner)
                 },
+                "training_subsets_by_readout": value[
+                    "training_subsets_by_readout"
+                ],
             }
             for case_id, value in preparation.selection_cases.items()
         },
@@ -413,6 +618,38 @@ def persist_and_read_back_freeze(
         raise ValueError("frozen plan dataset binding-proof hash mismatch")
     if loaded_plan.get("selection_record_hash") != selection_hash:
         raise ValueError("frozen plan selection binding mismatch")
+    loaded_selection_cases = loaded_selection.get("cases")
+    loaded_plan_cases = loaded_plan.get("cases")
+    if not isinstance(loaded_selection_cases, Mapping) or not isinstance(
+        loaded_plan_cases,
+        Mapping,
+    ):
+        raise ValueError("selection/frozen plan cases are missing")
+    binding_fields = (
+        "selected_by_readout",
+        "search_kind",
+        "declared_candidate_count",
+        "planned_cartesian_cell_count",
+        "evaluated_candidate_count",
+        "skipped_candidate_count",
+        "candidate_order",
+        "selection_order_by_readout",
+        "representative_readout",
+        "representative_candidate_id",
+        "representative_feature_condition",
+        "training_subsets_by_readout",
+    )
+    if set(loaded_selection_cases) != set(loaded_plan_cases):
+        raise ValueError("selection/frozen plan case sets differ")
+    for case_id, selection_case in loaded_selection_cases.items():
+        plan_case = loaded_plan_cases[case_id]
+        if any(
+            selection_case.get(field) != plan_case.get(field)
+            for field in binding_fields
+        ):
+            raise ValueError(
+                "frozen plan representative/search binding mismatch"
+            )
     if loaded_plan.get("test_evaluation_contract") != test_evaluation_contract():
         raise ValueError("frozen plan test-evaluation contract mismatch")
     if (
@@ -425,7 +662,7 @@ def persist_and_read_back_freeze(
         map_location="cpu",
         weights_only=True,
     )
-    if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v5":
+    if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v9":
         raise ValueError("unsupported frozen model archive schema")
     verify_execution_device_policy(
         loaded_archive,
@@ -438,6 +675,16 @@ def persist_and_read_back_freeze(
     )
     if loaded_archive.get("selection_record_hash") != selection_hash:
         raise ValueError("frozen model archive selection binding mismatch")
+    verify_selection_source_provenance_bindings(
+        selection=loaded_selection,
+        plan=loaded_plan,
+        archive=loaded_archive,
+    )
+    verify_representative_feature_bindings(
+        loaded_archive["models"],
+        selection=loaded_selection,
+        plan=loaded_plan,
+    )
     direct_diagnostic_count, direct_zero_fill_count = (
         verify_frozen_decoder_bindings(
             loaded_archive["models"],

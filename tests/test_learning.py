@@ -283,17 +283,29 @@ def test_matched_model1_negative_time_control_detects_difference() -> None:
     assert result["coefficient_max_abs_error"] > result["tolerance"]
 
 
+def _assert_distinct_non_aliasing_tensor_inputs(
+    calls: list[torch.Tensor],
+) -> None:
+    assert len(calls) == 2
+    first, second = calls
+    assert first is not second, "solve inputs must be different tensor objects"
+    assert (
+        first.untyped_storage().data_ptr()
+        != second.untyped_storage().data_ptr()
+    ), "solve inputs must not share storage"
+
+
 def test_matched_model1_uses_separate_solves_and_only_finite_feature_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     case = _matched_model1_case("heat_same_resolution_odd")
     original_evolve = model1_consistency.evolve
     original_build = model1_consistency.build_feature_initial_state
-    solve_inputs: list[tuple[int, int]] = []
+    solve_inputs: list[torch.Tensor] = []
     encoding_inputs: list[int] = []
 
     def tracked_evolve(values, evolution, *, domain_length):
-        solve_inputs.append((int(values.shape[-1]), values.data_ptr()))
+        solve_inputs.append(values)
         return original_evolve(
             values,
             evolution,
@@ -318,10 +330,27 @@ def test_matched_model1_uses_separate_solves_and_only_finite_feature_input(
 
     assert result["status"] == "pass"
     assert encoding_inputs == [case.n_tar]
-    assert [nx for nx, _ in solve_inputs] == [case.n_tar, case.n_sur]
     assert len(solve_inputs) == 2
-    assert solve_inputs[0][1] != solve_inputs[1][1]
+    assert [int(values.shape[-1]) for values in solve_inputs] == [
+        case.n_tar,
+        case.n_sur,
+    ]
+    _assert_distinct_non_aliasing_tensor_inputs(solve_inputs)
     assert result["independent_solve_outputs"]["status"] == "pass"
+
+
+def test_matched_model1_solve_input_check_rejects_reused_or_aliased_tensor() -> None:
+    solve_input = torch.zeros(1, 15, dtype=torch.float64)
+
+    with pytest.raises(AssertionError, match="different tensor objects"):
+        _assert_distinct_non_aliasing_tensor_inputs(
+            [solve_input, solve_input]
+        )
+
+    with pytest.raises(AssertionError, match="must not share storage"):
+        _assert_distinct_non_aliasing_tensor_inputs(
+            [solve_input, solve_input.view_as(solve_input)]
+        )
 
 
 def test_matched_model1_exact_cases_stay_inside_observable_band() -> None:

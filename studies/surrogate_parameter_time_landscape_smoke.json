@@ -1,0 +1,292 @@
+{
+  "schema_version": "pol-study-v3",
+  "name": "surrogate_parameter_time_landscape",
+  "output_root": "outputs/studies",
+  "artifact_root": "artifacts",
+  "profile": "smoke",
+  "dataset_spec": "configs/datasets/burgers_smoke.json",
+  "base_trial": {
+    "input": {
+      "n_tar": 32,
+      "resampling": "spectral"
+    },
+    "feature": {
+      "kind": "pde_dynamics",
+      "evolution": {
+        "system": {
+          "kind": "burgers",
+          "nu": 0.01,
+          "advection_coefficient": 1.0,
+          "solver": "split_step",
+          "dt": 0.01,
+          "fine_dt": 0.0025,
+          "dealias": true
+        },
+        "time": 0.01
+      },
+      "n_sur": 64,
+      "observation": {
+        "kind": "equispaced_points",
+        "J": 16,
+        "l2_scale": true
+      }
+    },
+    "output": {
+      "kind": "real_fourier",
+      "q": 17
+    },
+    "readouts": [
+      {
+        "id": "direct",
+        "kind": "direct_fourier_decoder",
+        "display_name": "Model 1"
+      },
+      {
+        "id": "affine",
+        "kind": "affine_ridge",
+        "display_name": "Model 2",
+        "zetas": [
+          0.0,
+          1e-12,
+          1e-08
+        ],
+        "tie_tolerance": 1e-12,
+        "tie_break": "largest_zeta",
+        "svd_rcond": null
+      },
+      {
+        "id": "random",
+        "kind": "random_feature_ridge",
+        "display_name": "Model 3",
+        "activation": "tanh",
+        "widths": [
+          4
+        ],
+        "weight_scales": [
+          0.5
+        ],
+        "bias_scales": [
+          0.1
+        ],
+        "selection_seeds": [
+          11,
+          12
+        ],
+        "evaluation_seeds": [
+          21,
+          22
+        ],
+        "zetas": [
+          0.0,
+          1e-08
+        ],
+        "tie_tolerance": 1e-12,
+        "svd_rcond": null
+      }
+    ]
+  },
+  "variants": [
+    {
+      "id": "heat",
+      "display_name": "Heat feature generator",
+      "overrides": {
+        "feature.evolution.system": {
+          "kind": "heat",
+          "nu": 0.01
+        }
+      },
+      "search": {
+        "kind": "grid",
+        "axes": [
+          {
+            "path": "feature.evolution.system.nu",
+            "values": [
+              0.005,
+              0.01
+            ]
+          },
+          {
+            "path": "feature.evolution.time",
+            "values": [
+              0.01,
+              0.02
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "burgers",
+      "display_name": "Burgers feature generator",
+      "overrides": {
+        "feature.evolution.system": {
+          "kind": "burgers",
+          "nu": 0.01,
+          "advection_coefficient": 1.0,
+          "solver": "split_step",
+          "dt": 0.01,
+          "fine_dt": 0.0025,
+          "dealias": true
+        }
+      },
+      "search": {
+        "kind": "grid",
+        "axes": [
+          {
+            "path": "feature.evolution.system.nu",
+            "values": [
+              0.005,
+              0.01
+            ]
+          },
+          {
+            "path": "feature.evolution.time",
+            "values": [
+              0.01,
+              0.02
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "reaction_diffusion",
+      "display_name": "Reaction-diffusion feature generator",
+      "overrides": {
+        "feature.evolution.system": {
+          "kind": "reaction_diffusion",
+          "nu": 0.01,
+          "alpha": 1.0,
+          "beta": 1.0,
+          "solver": "semi_implicit_spectral_euler",
+          "dt": 0.00125,
+          "nonlinear_filter": "two_thirds"
+        }
+      },
+      "search": {
+        "kind": "grid",
+        "axes": [
+          {
+            "path": "feature.evolution.system.nu",
+            "values": [
+              0.005,
+              0.01
+            ]
+          },
+          {
+            "path": "feature.evolution.time",
+            "values": [
+              0.01,
+              0.02
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "selection": {
+    "metric": "validation_field_relative_l2_mean",
+    "tie_tolerance": 1e-12,
+    "tie_break": "first_in_config_order",
+    "representative_readout": "affine",
+    "freeze_before_test": true
+  },
+  "convergence": {
+    "sample_ids": [
+      16,
+      11
+    ],
+    "n_sur_candidates": [
+      64,
+      128
+    ],
+    "tolerances": {
+      "terminal_mean": 0.5,
+      "terminal_max": 0.7,
+      "feature_mean": 0.5,
+      "feature_max": 0.7,
+      "prediction_mean": 0.5,
+      "prediction_max": 0.7
+    },
+    "max_auto_reruns": 0
+  },
+  "diagnostics": [],
+  "reporters": [
+    {
+      "kind": "metric_map",
+      "filename": "validation_heat_parameter_time_map",
+      "x": "feature_nu",
+      "y": "feature_time",
+      "x_values": [
+        0.005,
+        0.01
+      ],
+      "y_values": [
+        0.01,
+        0.02
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "affine",
+      "variant_id": "heat",
+      "mark_selected": true,
+      "formats": [
+        "png"
+      ],
+      "dpi": 80
+    },
+    {
+      "kind": "metric_map",
+      "filename": "validation_burgers_parameter_time_map",
+      "x": "feature_nu",
+      "y": "feature_time",
+      "x_values": [
+        0.005,
+        0.01
+      ],
+      "y_values": [
+        0.01,
+        0.02
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "affine",
+      "variant_id": "burgers",
+      "mark_selected": true,
+      "formats": [
+        "png"
+      ],
+      "dpi": 80
+    },
+    {
+      "kind": "metric_map",
+      "filename": "validation_reaction_diffusion_parameter_time_map",
+      "x": "feature_nu",
+      "y": "feature_time",
+      "x_values": [
+        0.005,
+        0.01
+      ],
+      "y_values": [
+        0.01,
+        0.02
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "affine",
+      "variant_id": "reaction_diffusion",
+      "mark_selected": true,
+      "formats": [
+        "png"
+      ],
+      "dpi": 80
+    }
+  ],
+  "execution": {
+    "torch_threads": 1,
+    "batch_size": 64,
+    "invalid_trial_policy": "error",
+    "cache_states": true,
+    "generate_plots": true
+  }
+}

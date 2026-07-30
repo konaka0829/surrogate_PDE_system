@@ -119,7 +119,7 @@ def write_tiny_stack(
     study_path = write_json(
         root / "study.json",
         {
-            "schema_version": "pol-study-v1",
+            "schema_version": "pol-study-v3",
             "name": "tiny_heat_study",
             "output_root": str(output_root),
             "artifact_root": str(artifact_root),
@@ -191,7 +191,7 @@ def write_tiny_stack(
                 [
                     {
                         "kind": "heat_multiplier",
-                        "identifiable_variance_floor": 1e-14,
+                        "identifiable_multiplier_floor": 1e-14,
                     }
                 ]
                 if include_diagnostics

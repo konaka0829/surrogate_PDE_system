@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import itertools
+import math
 from typing import Any
 
 from pol.config.models import (
@@ -21,6 +22,12 @@ class SearchOutcome:
     selected_by_readout: dict[str, str]
     stages_by_candidate: dict[str, tuple[str, ...]]
     skipped: tuple[dict[str, Any], ...]
+    search_kind: str
+    declared_candidate_count: int
+    planned_cartesian_cell_count: int | None
+    candidate_order: tuple[str, ...]
+    selection_order_by_readout: dict[str, tuple[str, ...]]
+    grid_cells: tuple[dict[str, Any], ...]
 
 
 class _Registry:
@@ -67,7 +74,15 @@ def _select(
     candidates = [value for value in evaluations if readout_id in value.rows]
     if not candidates:
         raise ValueError(f"no valid candidates for readout {readout_id}")
-    best = min(float(value.rows[readout_id][metric]) for value in candidates)
+    metric_values = [
+        float(value.rows[readout_id][metric]) for value in candidates
+    ]
+    if not all(math.isfinite(value) for value in metric_values):
+        raise ValueError(
+            f"readout {readout_id} has a non-finite validation "
+            f"selection metric {metric}"
+        )
+    best = min(metric_values)
     return next(
         value
         for value in candidates
@@ -95,16 +110,51 @@ def run_search(
     registry = _Registry(engine, invalid_policy)
     readout_ids = [readout.id for readout in base.readouts]
     selected: dict[str, str] = {}
+    selection_order_by_readout: dict[str, tuple[str, ...]] = {}
+    planned_cartesian_cell_count: int | None = None
+    grid_cells: list[dict[str, Any]] = []
     if isinstance(search, StaticSearchSpec):
         result = registry.evaluate(base, "static")
         selected = {readout_id: result.candidate_id for readout_id in readout_ids}
+        selection_order_by_readout = {
+            readout_id: (result.candidate_id,)
+            for readout_id in readout_ids
+        }
+        declared_candidate_count = 1
     elif isinstance(search, GridSearchSpec):
         evaluated: list[CandidateEvaluation] = []
-        for index, overrides in enumerate(_grid_overrides(search)):
+        planned_overrides = _grid_overrides(search)
+        planned_cartesian_cell_count = len(planned_overrides)
+        declared_candidate_count = planned_cartesian_cell_count
+        for index, overrides in enumerate(planned_overrides):
+            skipped_before = len(registry.skipped)
             result = registry.apply(base, overrides, f"grid:{index}")
             if result is not None:
                 evaluated.append(result)
+                grid_cells.append(
+                    {
+                        "cell_index": index,
+                        "axis_values": overrides,
+                        "status": "evaluated",
+                        "candidate_id": result.candidate_id,
+                        "reason": None,
+                    }
+                )
+            else:
+                skipped_item = registry.skipped[skipped_before]
+                grid_cells.append(
+                    {
+                        "cell_index": index,
+                        "axis_values": overrides,
+                        "status": "skipped",
+                        "candidate_id": None,
+                        "reason": skipped_item["reason"],
+                    }
+                )
         for readout_id in readout_ids:
+            selection_order_by_readout[readout_id] = tuple(
+                value.candidate_id for value in evaluated
+            )
             chosen = _select(
                 evaluated,
                 readout_id=readout_id,
@@ -113,6 +163,11 @@ def run_search(
             )
             selected[readout_id] = chosen.candidate_id
     elif isinstance(search, CoordinateSearchSpec):
+        declared_candidate_count = (
+            sum(len(axis.values) for axis in search.axes)
+            * (search.rounds + 1)
+            * len(readout_ids)
+        )
         first, second = search.axes
         for readout_id in readout_ids:
             current_first = first.anchor
@@ -193,6 +248,9 @@ def run_search(
                     selected_result.trial.model_dump(mode="python"), second.path
                 )
             selected[readout_id] = selected_result.candidate_id
+            selection_order_by_readout[readout_id] = tuple(
+                value.candidate_id for value in second_candidates
+            )
     else:
         raise TypeError(f"unsupported search type: {type(search).__name__}")
 
@@ -201,6 +259,12 @@ def run_search(
         selected_by_readout=selected,
         stages_by_candidate={key: tuple(value) for key, value in registry.stages.items()},
         skipped=tuple(registry.skipped),
+        search_kind=search.kind,
+        declared_candidate_count=declared_candidate_count,
+        planned_cartesian_cell_count=planned_cartesian_cell_count,
+        candidate_order=tuple(registry.evaluations),
+        selection_order_by_readout=selection_order_by_readout,
+        grid_cells=tuple(grid_cells),
     )
 
 

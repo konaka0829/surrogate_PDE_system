@@ -1,0 +1,137 @@
+{
+  "schema_version": "pol-study-v5",
+  "name": "learning_curve",
+  "output_root": "outputs/studies",
+  "artifact_root": "artifacts",
+  "profile": "smoke",
+  "dataset_spec": "configs/datasets/burgers_smoke.json",
+  "base_trial": {
+    "input": {"n_tar": 32, "resampling": "spectral"},
+    "feature": {
+      "kind": "pde_dynamics",
+      "evolution": {
+        "system": {
+          "kind": "burgers",
+          "nu": 0.01,
+          "advection_coefficient": 1.0,
+          "solver": "split_step",
+          "dt": 0.01,
+          "fine_dt": 0.0025,
+          "dealias": true
+        },
+        "time": 0.02
+      },
+      "n_sur": 64,
+      "observation": {
+        "kind": "equispaced_points",
+        "J": 16,
+        "l2_scale": true
+      }
+    },
+    "output": {"kind": "real_fourier", "q": 17},
+    "readouts": [
+      {
+        "id": "direct",
+        "kind": "direct_fourier_decoder",
+        "display_name": "Model 1"
+      },
+      {
+        "id": "affine",
+        "kind": "affine_ridge",
+        "display_name": "Model 2",
+        "zetas": [0.0, 1e-12, 1e-8],
+        "tie_tolerance": 1e-12,
+        "tie_break": "largest_zeta",
+        "svd_rcond": null
+      },
+      {
+        "id": "random",
+        "kind": "random_feature_ridge",
+        "display_name": "Model 3",
+        "activation": "tanh",
+        "widths": [4],
+        "weight_scales": [0.5],
+        "bias_scales": [0.1],
+        "selection_seeds": [101, 102],
+        "evaluation_seeds": [201, 202],
+        "zetas": [0.0, 1e-8],
+        "tie_tolerance": 1e-12,
+        "svd_rcond": null
+      }
+    ],
+    "training_subset": {
+      "kind": "nested_train_prefix",
+      "n_train": 4,
+      "policy_version": 1
+    }
+  },
+  "variants": [
+    {
+      "id": "burgers",
+      "display_name": "Selected Burgers dynamic features",
+      "selection_source": {
+        "kind": "completed_study_selection",
+        "source_study_spec": "studies/surrogate_parameter_time_landscape_smoke.json",
+        "source_variant_id": "burgers",
+        "source_readout_id": "affine",
+        "import_paths": [
+          "feature.evolution.system",
+          "feature.evolution.time"
+        ]
+      },
+      "overrides": {},
+      "search": {"kind": "static"}
+    }
+  ],
+  "learning_curve": {
+    "kind": "learning_curve",
+    "training_axis_path": "training_subset.n_train",
+    "subset_policy": "canonical_train_order_prefix_v1"
+  },
+  "global_axes": [
+    {
+      "path": "training_subset.n_train",
+      "values": [4, 8, 16]
+    }
+  ],
+  "selection": {
+    "metric": "validation_field_relative_l2_mean",
+    "tie_tolerance": 1e-12,
+    "tie_break": "first_in_config_order",
+    "representative_readout": "affine",
+    "freeze_before_test": true
+  },
+  "convergence": null,
+  "diagnostics": [
+    {
+      "kind": "readout_stability_noise",
+      "levels": [0.0],
+      "repeats": 2,
+      "seed": 7101,
+      "scaling": {"kind": "relative_global_feature_rms"},
+      "common_random_numbers": true,
+      "include_prediction_ensemble": true,
+      "covariance_rcond": 1e-12
+    }
+  ],
+  "reporters": [
+    {
+      "kind": "learning_curve",
+      "filename": "test_learning_curve",
+      "metric": "test_field_relative_l2_mean",
+      "split": "test",
+      "group_by": ["variant_id", "readout_id"],
+      "xscale": "log",
+      "yscale": "log",
+      "formats": ["png"],
+      "dpi": 100
+    }
+  ],
+  "execution": {
+    "torch_threads": 1,
+    "batch_size": 3,
+    "invalid_trial_policy": "error",
+    "cache_states": true,
+    "generate_plots": true
+  }
+}

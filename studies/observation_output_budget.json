@@ -1,0 +1,360 @@
+{
+  "schema_version": "pol-study-v3",
+  "output_root": "outputs/studies",
+  "artifact_root": "artifacts",
+  "profile": "main",
+  "dataset_spec": "configs/datasets/burgers_main.json",
+  "selection": {
+    "metric": "validation_field_relative_l2_mean",
+    "tie_tolerance": 1e-08,
+    "tie_break": "first_in_config_order",
+    "representative_readout": "affine",
+    "freeze_before_test": true
+  },
+  "execution": {
+    "torch_threads": 1,
+    "batch_size": 64,
+    "invalid_trial_policy": "error",
+    "cache_states": true,
+    "generate_plots": true
+  },
+  "name": "observation_output_budget",
+  "base_trial": {
+    "input": {
+      "n_tar": 512,
+      "resampling": "spectral"
+    },
+    "feature": {
+      "kind": "pde_dynamics",
+      "evolution": {
+        "system": {
+          "kind": "burgers",
+          "nu": 0.01,
+          "advection_coefficient": 1.0,
+          "solver": "split_step",
+          "dt": 0.01,
+          "fine_dt": 0.001,
+          "dealias": true
+        },
+        "time": 1.0
+      },
+      "n_sur": 512,
+      "observation": {
+        "kind": "equispaced_points",
+        "J": 256,
+        "l2_scale": true
+      }
+    },
+    "output": {
+      "kind": "real_fourier",
+      "q": 257
+    },
+    "readouts": [
+      {
+        "id": "direct",
+        "kind": "direct_fourier_decoder",
+        "display_name": "Model 1"
+      },
+      {
+        "id": "affine",
+        "kind": "affine_ridge",
+        "display_name": "Model 2",
+        "zetas": [
+          0.0,
+          1e-12,
+          1e-10,
+          1e-08,
+          1e-06,
+          0.0001
+        ],
+        "tie_tolerance": 1e-10,
+        "tie_break": "largest_zeta",
+        "svd_rcond": null
+      },
+      {
+        "id": "random",
+        "kind": "random_feature_ridge",
+        "display_name": "Model 3",
+        "activation": "tanh",
+        "widths": [
+          128,
+          256,
+          512
+        ],
+        "weight_scales": [
+          0.25,
+          0.5,
+          1.0
+        ],
+        "bias_scales": [
+          0.0,
+          0.1
+        ],
+        "selection_seeds": [
+          101,
+          102,
+          103,
+          104,
+          105
+        ],
+        "evaluation_seeds": [
+          201,
+          202,
+          203,
+          204,
+          205,
+          206,
+          207,
+          208,
+          209,
+          210
+        ],
+        "zetas": [
+          0.0,
+          1e-12,
+          1e-10,
+          1e-08,
+          1e-06,
+          0.0001
+        ],
+        "tie_tolerance": 1e-10,
+        "svd_rcond": null
+      }
+    ]
+  },
+  "variants": [
+    {
+      "id": "burgers",
+      "display_name": "Burgers feature generator",
+      "selection_source": {
+        "kind": "completed_study_selection",
+        "source_study_spec": "studies/surrogate_parameter_time_landscape.json",
+        "source_variant_id": "burgers",
+        "source_readout_id": "affine",
+        "import_paths": [
+          "feature.evolution.system",
+          "feature.evolution.time"
+        ]
+      },
+      "overrides": {},
+      "search": {
+        "kind": "static"
+      }
+    },
+    {
+      "id": "reaction_diffusion",
+      "display_name": "reaction-diffusion feature generator",
+      "selection_source": {
+        "kind": "completed_study_selection",
+        "source_study_spec": "studies/surrogate_parameter_time_landscape.json",
+        "source_variant_id": "reaction_diffusion",
+        "source_readout_id": "affine",
+        "import_paths": [
+          "feature.evolution.system",
+          "feature.evolution.time"
+        ]
+      },
+      "overrides": {},
+      "search": {
+        "kind": "static"
+      }
+    }
+  ],
+  "global_axes": [
+    {
+      "path": "feature.observation.J",
+      "values": [
+        32,
+        64,
+        128,
+        256,
+        512
+      ]
+    },
+    {
+      "path": "output.q",
+      "values": [
+        33,
+        65,
+        129,
+        257
+      ]
+    }
+  ],
+  "reporters": [
+    {
+      "kind": "metric_map",
+      "filename": "validation_observation_output_budget_burgers_direct",
+      "x": "J",
+      "y": "q",
+      "x_values": [
+        32,
+        64,
+        128,
+        256,
+        512
+      ],
+      "y_values": [
+        33,
+        65,
+        129,
+        257
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "direct",
+      "variant_id": "burgers",
+      "mark_selected": false,
+      "formats": [
+        "png",
+        "pdf"
+      ],
+      "dpi": 120
+    },
+    {
+      "kind": "metric_map",
+      "filename": "validation_observation_output_budget_burgers_affine",
+      "x": "J",
+      "y": "q",
+      "x_values": [
+        32,
+        64,
+        128,
+        256,
+        512
+      ],
+      "y_values": [
+        33,
+        65,
+        129,
+        257
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "affine",
+      "variant_id": "burgers",
+      "mark_selected": false,
+      "formats": [
+        "png",
+        "pdf"
+      ],
+      "dpi": 120
+    },
+    {
+      "kind": "metric_map",
+      "filename": "validation_observation_output_budget_burgers_random",
+      "x": "J",
+      "y": "q",
+      "x_values": [
+        32,
+        64,
+        128,
+        256,
+        512
+      ],
+      "y_values": [
+        33,
+        65,
+        129,
+        257
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "random",
+      "variant_id": "burgers",
+      "mark_selected": false,
+      "formats": [
+        "png",
+        "pdf"
+      ],
+      "dpi": 120
+    },
+    {
+      "kind": "metric_map",
+      "filename": "validation_observation_output_budget_reaction_diffusion_direct",
+      "x": "J",
+      "y": "q",
+      "x_values": [
+        32,
+        64,
+        128,
+        256,
+        512
+      ],
+      "y_values": [
+        33,
+        65,
+        129,
+        257
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "direct",
+      "variant_id": "reaction_diffusion",
+      "mark_selected": false,
+      "formats": [
+        "png",
+        "pdf"
+      ],
+      "dpi": 120
+    },
+    {
+      "kind": "metric_map",
+      "filename": "validation_observation_output_budget_reaction_diffusion_affine",
+      "x": "J",
+      "y": "q",
+      "x_values": [
+        32,
+        64,
+        128,
+        256,
+        512
+      ],
+      "y_values": [
+        33,
+        65,
+        129,
+        257
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "affine",
+      "variant_id": "reaction_diffusion",
+      "mark_selected": false,
+      "formats": [
+        "png",
+        "pdf"
+      ],
+      "dpi": 120
+    },
+    {
+      "kind": "metric_map",
+      "filename": "validation_observation_output_budget_reaction_diffusion_random",
+      "x": "J",
+      "y": "q",
+      "x_values": [
+        32,
+        64,
+        128,
+        256,
+        512
+      ],
+      "y_values": [
+        33,
+        65,
+        129,
+        257
+      ],
+      "metric": "validation_field_relative_l2_mean",
+      "split": "validation",
+      "readout_id": "random",
+      "variant_id": "reaction_diffusion",
+      "mark_selected": false,
+      "formats": [
+        "png",
+        "pdf"
+      ],
+      "dpi": 120
+    }
+  ]
+}

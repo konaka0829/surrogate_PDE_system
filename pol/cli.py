@@ -8,12 +8,24 @@ import sys
 from pol.artifacts import verify_artifact
 from pol.config.loader import (
     load_dataset_spec,
+    load_digital_baseline_spec,
+    load_report_spec,
     load_study_spec,
     load_study_with_overrides,
     load_validation_spec,
 )
 from pol.data.dataset import ensure_dataset
+from pol.digital_baselines.protocol import plan_digital_baseline
+from pol.digital_baselines.runner import (
+    run_digital_baseline,
+    verify_digital_baseline_run,
+)
+from pol.reporting.runner import run_report, verify_report
 from pol.study.runner import plan_study, run_study, verify_study_run
+from pol.study.selection_source import (
+    inspect_completed_study_selection,
+    verify_downstream_selection,
+)
 from pol.validation.runner import ensure_validation
 
 
@@ -57,7 +69,7 @@ def _parser() -> argparse.ArgumentParser:
         "run",
         help="run a CPU-only study; a scalar run is a one-cell study",
     )
-    run.add_argument("spec", help="path to a pol-study-v1 JSON spec")
+    run.add_argument("spec", help="path to a pol-study-v3 JSON spec")
     modes = run.add_mutually_exclusive_group()
     modes.add_argument("--plan", action="store_true")
     modes.add_argument("--force", action="store_true")
@@ -75,6 +87,60 @@ def _parser() -> argparse.ArgumentParser:
         "verify", help="verify an artifact directory or completed study run"
     )
     verify.add_argument("path")
+
+    selection = commands.add_parser(
+        "selection",
+        help="read-only completed-study selection dependency operations",
+    )
+    selection_commands = selection.add_subparsers(
+        dest="selection_command",
+        required=True,
+    )
+    inspect = selection_commands.add_parser(
+        "inspect",
+        help="inspect a verified completed study's representative selections",
+    )
+    inspect.add_argument("spec", help="path to a source pol-study-v3 spec")
+    selection_verify = selection_commands.add_parser(
+        "verify",
+        help="verify downstream selection bindings without running a study",
+    )
+    selection_verify.add_argument(
+        "spec",
+        help="path to a downstream pol-study-v3 spec",
+    )
+
+    report = commands.add_parser(
+        "report",
+        help="build or verify a read-only cross-run report artifact",
+    )
+    report.add_argument(
+        "target",
+        help="path to a pol-report-v1 spec, or the literal 'verify'",
+    )
+    report.add_argument(
+        "path",
+        nargs="?",
+        help="report artifact directory when target is 'verify'",
+    )
+    report.add_argument("--force", action="store_true")
+
+    digital = commands.add_parser(
+        "digital-baseline",
+        help="run, plan, or verify a digital neural-operator baseline",
+    )
+    digital.add_argument(
+        "target",
+        help="path to a pol-digital-baseline-v1 spec, or the literal 'verify'",
+    )
+    digital.add_argument(
+        "path",
+        nargs="?",
+        help="digital baseline run directory when target is 'verify'",
+    )
+    digital_modes = digital.add_mutually_exclusive_group()
+    digital_modes.add_argument("--plan", action="store_true")
+    digital_modes.add_argument("--force", action="store_true")
     return parser
 
 
@@ -128,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
                 else load_study_spec(args.spec, repo_root=repo_root)
             )
             if args.plan:
-                _print(plan_study(spec))
+                _print(plan_study(spec, repo_root=repo_root))
                 return 0
             result = run_study(
                 spec,
@@ -155,12 +221,147 @@ def main(argv: list[str] | None = None) -> int:
             if schema == "pol-artifact-manifest-v1":
                 manifest = verify_artifact(path)
                 kind = "artifact"
-            elif schema == "pol-study-run-manifest-v5":
+            elif schema in {
+                "pol-study-run-manifest-v8",
+                "pol-study-run-manifest-v9",
+                "pol-study-run-manifest-v10",
+                "pol-study-run-manifest-v11",
+                "pol-study-run-manifest-v12",
+                "pol-study-run-manifest-v13",
+                "pol-study-run-manifest-v14",
+            }:
                 manifest = verify_study_run(path)
                 kind = "study_run"
+            elif schema == "pol-report-manifest-v1":
+                manifest = verify_report(path)
+                kind = "report"
+            elif schema == "pol-digital-baseline-run-manifest-v1":
+                manifest = verify_digital_baseline_run(path)
+                kind = "digital_baseline_run"
             else:
                 raise ValueError(f"unsupported manifest schema: {schema}")
             _print({"status": "pass", "kind": kind, "path": str(path), "manifest": manifest})
+            return 0
+        if args.command == "selection":
+            spec = load_study_spec(args.spec, repo_root=repo_root)
+            if args.selection_command == "inspect":
+                _print(
+                    inspect_completed_study_selection(
+                        spec,
+                        repo_root=repo_root,
+                    )
+                )
+                return 0
+            if args.selection_command == "verify":
+                _print(
+                    verify_downstream_selection(
+                        spec,
+                        repo_root=repo_root,
+                    )
+                )
+                return 0
+            raise AssertionError("unreachable selection command")
+        if args.command == "report":
+            if args.target == "verify":
+                if args.path is None:
+                    raise ValueError("pol report verify requires a report directory")
+                if args.force:
+                    raise ValueError("--force is not valid for report verification")
+                path = Path(args.path).resolve()
+                manifest = verify_report(path)
+                _print(
+                    {
+                        "status": "pass",
+                        "kind": "report",
+                        "path": str(path),
+                        "manifest": manifest,
+                    }
+                )
+                return 0
+            if args.path is not None:
+                raise ValueError(
+                    "unexpected report argument; use pol report SPEC or "
+                    "pol report verify REPORT_DIR"
+                )
+            spec = load_report_spec(args.target, repo_root=repo_root)
+            result = run_report(
+                spec,
+                repo_root=repo_root,
+                force=args.force,
+            )
+            _print(
+                {
+                    "status": result.summary["status"],
+                    "kind": "report",
+                    "path": str(result.path),
+                    "report_id": result.report_id,
+                    "reused": result.reused,
+                    "summary": result.summary,
+                }
+            )
+            return 0
+        if args.command == "digital-baseline":
+            if args.target == "verify":
+                if args.path is None:
+                    raise ValueError(
+                        "pol digital-baseline verify requires a run directory"
+                    )
+                if args.plan or args.force:
+                    raise ValueError(
+                        "--plan/--force are not valid for digital baseline verification"
+                    )
+                path = Path(args.path).resolve()
+                manifest = verify_digital_baseline_run(path)
+                _print(
+                    {
+                        "status": "pass",
+                        "kind": "digital_baseline_run",
+                        "path": str(path),
+                        "manifest": manifest,
+                    }
+                )
+                return 0
+            if args.path is not None:
+                raise ValueError(
+                    "unexpected digital baseline argument; use "
+                    "pol digital-baseline SPEC or "
+                    "pol digital-baseline verify RUN_DIR"
+                )
+            spec = load_digital_baseline_spec(
+                args.target,
+                repo_root=repo_root,
+            )
+            if args.plan:
+                dataset_spec = load_dataset_spec(
+                    spec.dataset_spec,
+                    repo_root=repo_root,
+                )
+                validation_spec = load_validation_spec(
+                    dataset_spec.validation_spec,
+                    repo_root=repo_root,
+                )
+                _print(
+                    plan_digital_baseline(
+                        spec,
+                        n_train=int(validation_spec.samples.n_train),
+                    )
+                )
+                return 0
+            result = run_digital_baseline(
+                spec,
+                repo_root=repo_root,
+                force=args.force,
+            )
+            _print(
+                {
+                    "status": result.summary["status"],
+                    "kind": "digital_baseline_run",
+                    "path": str(result.path),
+                    "run_id": result.run_id,
+                    "reused": result.reused,
+                    "summary": result.summary,
+                }
+            )
             return 0
         raise AssertionError("unreachable command")
     except (OSError, RuntimeError, ValueError, TypeError, json.JSONDecodeError) as exc:

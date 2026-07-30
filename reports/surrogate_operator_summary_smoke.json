@@ -1,0 +1,114 @@
+{
+  "schema_version": "pol-report-v1",
+  "name": "surrogate_operator_summary",
+  "profile": "smoke",
+  "output_root": "outputs/reports",
+  "sources": [
+    {
+      "id": "parameter_time",
+      "study_spec": "studies/surrogate_parameter_time_landscape_smoke.json"
+    },
+    {
+      "id": "observation_output",
+      "study_spec": "studies/observation_output_budget_smoke.json"
+    },
+    {
+      "id": "input_simulation",
+      "study_spec": "studies/input_simulation_resolution_smoke.json"
+    },
+    {
+      "id": "dynamic_baselines",
+      "study_spec": "studies/dynamic_feature_baseline_comparison_smoke.json"
+    }
+  ],
+  "reporters": [
+    {
+      "kind": "phase_diagram_report",
+      "source_id": "parameter_time",
+      "filename": "validation_parameter_time_burgers_affine",
+      "split": "validation",
+      "metric": "validation_field_relative_l2_mean",
+      "variant_id": "burgers",
+      "readout_id": "affine",
+      "x": "feature_nu",
+      "y": "feature_time",
+      "x_values": [0.005, 0.01],
+      "y_values": [0.01, 0.02],
+      "x_label": "surrogate diffusion coefficient",
+      "y_label": "surrogate readout time",
+      "metric_label": "validation relative L2 field error",
+      "xscale": "log",
+      "yscale": "log",
+      "mark_selected": true,
+      "formats": ["png"],
+      "dpi": 100
+    },
+    {
+      "kind": "phase_diagram_report",
+      "source_id": "observation_output",
+      "filename": "validation_observation_output_burgers_affine",
+      "split": "validation",
+      "metric": "validation_field_relative_l2_mean",
+      "variant_id": "burgers",
+      "readout_id": "affine",
+      "x": "J",
+      "y": "q",
+      "x_values": [4, 8],
+      "y_values": [5, 9],
+      "x_label": "observation count J",
+      "y_label": "output coefficient count q",
+      "metric_label": "validation relative L2 field error",
+      "xscale": "linear",
+      "yscale": "linear",
+      "mark_selected": false,
+      "formats": ["png"],
+      "dpi": 100
+    },
+    {
+      "kind": "phase_diagram_report",
+      "source_id": "input_simulation",
+      "filename": "validation_input_simulation_burgers_affine",
+      "split": "validation",
+      "metric": "validation_field_relative_l2_mean",
+      "variant_id": "burgers",
+      "readout_id": "affine",
+      "x": "n_tar",
+      "y": "n_sur",
+      "x_values": [9, 16],
+      "y_values": [9, 16],
+      "x_label": "finite input resolution n_tar",
+      "y_label": "surrogate simulation resolution n_sur",
+      "metric_label": "validation relative L2 field error",
+      "xscale": "linear",
+      "yscale": "linear",
+      "mark_selected": false,
+      "formats": ["png"],
+      "dpi": 100
+    },
+    {
+      "kind": "baseline_summary_table",
+      "source_id": "dynamic_baselines",
+      "filename": "dynamic_feature_baseline_summary",
+      "rows": [
+        {"id": "static_direct", "label": "Static / Model 1", "variant_id": "static_input", "readout_id": "direct"},
+        {"id": "static_affine", "label": "Static / Model 2", "variant_id": "static_input", "readout_id": "affine"},
+        {"id": "static_random", "label": "Static / Model 3", "variant_id": "static_input", "readout_id": "random"},
+        {"id": "heat_direct", "label": "Heat / Model 1", "variant_id": "heat", "readout_id": "direct"},
+        {"id": "heat_affine", "label": "Heat / Model 2", "variant_id": "heat", "readout_id": "affine"},
+        {"id": "heat_random", "label": "Heat / Model 3", "variant_id": "heat", "readout_id": "random"},
+        {"id": "burgers_direct", "label": "Burgers / Model 1", "variant_id": "burgers", "readout_id": "direct"},
+        {"id": "burgers_affine", "label": "Burgers / Model 2", "variant_id": "burgers", "readout_id": "affine"},
+        {"id": "burgers_random", "label": "Burgers / Model 3", "variant_id": "burgers", "readout_id": "random"},
+        {"id": "reaction_direct", "label": "Reaction-diffusion / Model 1", "variant_id": "reaction_diffusion", "readout_id": "direct"},
+        {"id": "reaction_affine", "label": "Reaction-diffusion / Model 2", "variant_id": "reaction_diffusion", "readout_id": "affine"},
+        {"id": "reaction_random", "label": "Reaction-diffusion / Model 3", "variant_id": "reaction_diffusion", "readout_id": "random"}
+      ],
+      "field_metric": "test_field_relative_l2_mean",
+      "data_metric": "test_data_field_relative_l2_mean",
+      "field_representation_floor_metric": "test_representation_floor_relative_l2_mean",
+      "data_representation_floor_metric": "test_data_representation_floor_relative_l2_mean",
+      "formatted_outputs": ["markdown", "latex"],
+      "significant_digits": 4
+    }
+  ]
+}

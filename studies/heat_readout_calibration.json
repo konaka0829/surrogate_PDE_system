@@ -1,5 +1,5 @@
 {
-  "schema_version": "pol-study-v1",
+  "schema_version": "pol-study-v3",
   "name": "heat_readout_calibration",
   "output_root": "outputs/studies",
   "artifact_root": "artifacts",
@@ -105,7 +105,8 @@
   },
   "variants": [
     {
-      "id": "stable",
+      "id": "under_diffusive",
+      "display_name": "under-diffusive heat feature",
       "overrides": {
         "feature.evolution.system.nu": 0.005
       },
@@ -114,7 +115,18 @@
       }
     },
     {
-      "id": "unstable",
+      "id": "matched",
+      "display_name": "matched heat feature",
+      "overrides": {
+        "feature.evolution.system.nu": 0.01
+      },
+      "search": {
+        "kind": "static"
+      }
+    },
+    {
+      "id": "more_diffusive",
+      "display_name": "more-diffusive heat feature with amplifying ideal inverse",
       "overrides": {
         "feature.evolution.system.nu": 0.015
       },
@@ -144,18 +156,7 @@
   "diagnostics": [
     {
       "kind": "heat_multiplier",
-      "identifiable_variance_floor": 1e-14
-    },
-    {
-      "kind": "noise_robustness",
-      "levels": [
-        0.0,
-        0.0001,
-        0.001,
-        0.01
-      ],
-      "repeats": 20,
-      "seed": 73
+      "identifiable_multiplier_floor": 1e-14
     }
   ],
   "reporters": [
@@ -178,11 +179,13 @@
       "dpi": 100
     },
     {
-      "kind": "noise_curve",
-      "filename": "noise_robustness",
-      "metric": "field_relative_l2_mean",
+      "kind": "heat_multiplier_comparison",
+      "filename": "ideal_vs_effective_multiplier",
+      "readout_id": "affine",
+      "q": 65,
       "formats": [
-        "png"
+        "png",
+        "pdf"
       ],
       "dpi": 100
     }

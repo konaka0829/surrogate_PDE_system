@@ -20,6 +20,22 @@ from tests.helpers import write_json, write_tiny_heat_stack, write_tiny_stack
 
 def test_validation_modules_import_without_a_package_cycle() -> None:
     repo_root = Path(__file__).resolve().parents[1]
+    standalone_modules = (
+        "pol.validation.foundation_checks",
+        "pol.validation.heat_reference",
+        "pol.validation.reaction_diffusion_reference",
+        "pol.validation.burgers_reference",
+        "pol.validation.target_checks",
+        "pol.validation.contracts",
+        "pol.validation.certificates",
+        "pol.validation.publication",
+    )
+    for module in standalone_modules:
+        subprocess.run(
+            [sys.executable, "-c", f"import {module}"],
+            cwd=repo_root,
+            check=True,
+        )
     subprocess.run(
         [
             sys.executable,
@@ -28,6 +44,8 @@ def test_validation_modules_import_without_a_package_cycle() -> None:
                 "import pol.validation.conditions; "
                 "import pol.validation.binding; "
                 "import pol.validation.runner; "
+                "assert pol.validation.runner.load_validation_certificate "
+                "is pol.validation.certificates.load_validation_certificate; "
                 "from pol.validation import ensure_validation; "
                 "from pol.data import ensure_dataset"
             ),

@@ -8,6 +8,8 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from .models import DatasetSpec, StudySpec, ValidationSpec
+from .report_models import ReportSpec
+from pol.digital_baselines.protocol import DigitalBaselineSpec
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -61,6 +63,41 @@ def _prepare_paths(
         result["dataset_spec"] = _resolve_path(
             result["dataset_spec"], repo_root=repo_root
         )
+        for variant in result.get("variants", []):
+            if not isinstance(variant, dict):
+                continue
+            source = variant.get("selection_source")
+            if isinstance(source, dict) and "source_study_spec" in source:
+                source["source_study_spec"] = _resolve_path(
+                    source["source_study_spec"],
+                    repo_root=repo_root,
+                )
+    elif kind == "report":
+        result["output_root"] = _resolve_path(
+            result.get("output_root", "outputs/reports"),
+            repo_root=repo_root,
+        )
+        for source in result.get("sources", []):
+            if isinstance(source, dict) and "study_spec" in source:
+                source["study_spec"] = _resolve_path(
+                    source["study_spec"],
+                    repo_root=repo_root,
+                )
+    elif kind == "digital_baseline":
+        result["output_root"] = _resolve_path(
+            result.get("output_root", "outputs/digital_baselines"),
+            repo_root=repo_root,
+        )
+        result["dataset_spec"] = _resolve_path(
+            result["dataset_spec"],
+            repo_root=repo_root,
+        )
+        comparison = result.get("physical_comparison")
+        if isinstance(comparison, dict) and "source_study_spec" in comparison:
+            comparison["source_study_spec"] = _resolve_path(
+                comparison["source_study_spec"],
+                repo_root=repo_root,
+            )
     return result
 
 
@@ -86,6 +123,15 @@ def _load(model: type[T], path: str | Path, *, repo_root: Path, kind: str) -> T:
             f"unsupported legacy dataset schema {schema_version}; migrate to "
             "pol-dataset-v3 and regenerate the target-reference binding proof"
         )
+    if kind == "study" and schema_version in {
+        "pol-study-v1",
+        "pol-study-v2",
+    }:
+        raise ValueError(
+            f"unsupported legacy study schema {schema_version}; migrate to "
+            "pol-study-v3 so completed-study selection provenance cannot be "
+            "silently omitted"
+        )
     prepared = _prepare_paths(raw, repo_root=repo_root, kind=kind)
     try:
         return model.model_validate(prepared)
@@ -103,6 +149,23 @@ def load_dataset_spec(path: str | Path, *, repo_root: Path) -> DatasetSpec:
 
 def load_study_spec(path: str | Path, *, repo_root: Path) -> StudySpec:
     return _load(StudySpec, path, repo_root=repo_root, kind="study")
+
+
+def load_report_spec(path: str | Path, *, repo_root: Path) -> ReportSpec:
+    return _load(ReportSpec, path, repo_root=repo_root, kind="report")
+
+
+def load_digital_baseline_spec(
+    path: str | Path,
+    *,
+    repo_root: Path,
+) -> DigitalBaselineSpec:
+    return _load(
+        DigitalBaselineSpec,
+        path,
+        repo_root=repo_root,
+        kind="digital_baseline",
+    )
 
 
 def _set_path(root: dict[str, Any], path: str, value: Any) -> None:

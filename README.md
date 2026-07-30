@@ -115,6 +115,7 @@ and reaction-diffusion certificates remain future validation work.
 ```text
 pol/
 ├── config/       strict, discriminated configuration models and loaders
+├── digital_baselines/ independent FNO optimization, freeze, evaluation, verification
 ├── math/         periodic grids, spectral resampling, real Fourier maps
 ├── systems/      heat, Burgers, and reaction-diffusion evolution systems
 ├── data/         validation-bound reference datasets and finite-resolution views
@@ -132,6 +133,9 @@ configs/
 
 studies/
 └── *.json        question-based combinations of reusable components
+
+digital_baselines/
+└── *.json        digital neural-operator baseline profiles
 ```
 
 `studies/` contains only declarative combinations of reusable components. The
@@ -182,12 +186,15 @@ and cross-device reproducibility remain unimplemented.
 
 ## Command-line interface
 
-There are four commands.
+The main workflow commands are:
 
 ```bash
 pol validate SPEC
 pol data build SPEC
 pol run STUDY
+pol selection inspect|verify STUDY
+pol report REPORT
+pol digital-baseline SPEC
 pol verify PATH
 ```
 
@@ -287,21 +294,22 @@ runner types.
 
 ```bash
 python -m pol run studies/heat_readout_calibration_smoke.json
-python -m pol run studies/surrogate_parameter_time_smoke.json
-python -m pol run studies/observation_output_map_smoke.json
-python -m pol run studies/finite_surrogate_resolution_map_smoke.json
+python -m pol run studies/surrogate_parameter_time_coordinate_search_smoke.json
+python -m pol run studies/surrogate_parameter_time_landscape_smoke.json
+python -m pol run studies/observation_output_budget_smoke.json
+python -m pol run studies/input_simulation_resolution_smoke.json
 ```
 
 Inspect the expansion without creating artifacts or output directories:
 
 ```bash
-python -m pol run studies/surrogate_parameter_time_smoke.json --plan
+python -m pol run studies/surrogate_parameter_time_landscape_smoke.json --plan
 ```
 
 Override an existing field without editing JSON:
 
 ```bash
-python -m pol run studies/surrogate_parameter_time_smoke.json \
+python -m pol run studies/surrogate_parameter_time_landscape_smoke.json \
   --set base_trial.feature.observation.J=8 \
   --set base_trial.output.q=9
 ```
@@ -317,9 +325,36 @@ python -m pol run STUDY.json --force
 
 # Recreate figures from a verified completed run with the same study identity.
 python -m pol run STUDY.json --plots-only
+
+# Build a content-addressed report from existing verified study runs only.
+python -m pol report reports/surrogate_operator_summary_smoke.json
+
+# Verify the report artifact and every recorded output byte.
+python -m pol report verify outputs/reports/<report>/<profile-hash>
 ```
 
-### 4. Verify an artifact or study run
+### 4. Run or verify the digital FNO baseline
+
+The digital baseline shares the validated dataset, canonical split, finite
+`n_tar` input, `q` output, and field/data metrics with the physical studies,
+but it has its own optimizer/checkpoint adapter:
+
+```bash
+python -m pol digital-baseline digital_baselines/fno1d_smoke.json --plan
+python -m pol digital-baseline digital_baselines/fno1d_smoke.json
+python -m pol digital-baseline verify outputs/digital_baselines/<name>/<profile-hash>
+```
+
+The exact physical baseline source must already exist and verify; the command
+never starts that source implicitly. Architecture/checkpoint selection is
+validation-only. Frozen evaluation-seed checkpoints and the evaluation plan
+are hashed and read back before the test finite view is requested. Primary
+test results summarize independent training-seed metrics; prediction averaging
+is stored separately. The fairness CSV records distinct physical and digital
+inference paths and forbids wall-clock/energy claims without a common
+measurement protocol.
+
+### 5. Verify an artifact or study run
 
 ```bash
 python -m pol verify artifacts/validations/<hash>
@@ -363,7 +398,8 @@ A `StudySpec` adds:
 - static, grid, or coordinate search;
 - validation-only selection;
 - optional surrogate-resolution convergence;
-- diagnostics such as heat multipliers or observation noise;
+- diagnostics such as heat multipliers or readout stability under observation
+  noise;
 - generic reporters over result tables.
 
 The implemented feature-generator kinds are:
@@ -371,6 +407,61 @@ The implemented feature-generator kinds are:
 - `pde_dynamics`: evolve the finite input with a configured surrogate PDE;
 - `static_input`: observe the encoded finite input without evolution, for a
   no-dynamics baseline through the same trial and study path.
+
+`studies/dynamic_feature_baseline_comparison*.json` fixes one shared
+`n_tar/n_sur/J/q`, observation, and readout-candidate contract across
+`static_input`, heat, Burgers, and reaction-diffusion features. Dynamic
+conditions are imported from a verified completed validation selection;
+static input carries an explicit no-evolution marker. The completed run writes
+`selected_comparison.csv` by joining validation-selected rows to primary
+frozen-model test rows. Random-feature ensembles remain in their separate
+table.
+
+`studies/readout_stability_noise*.json` consumes only the persisted and
+read-back frozen models selected by the parameter/time study. It records
+clean and noisy test metrics in per-repeat long form, learned readout norms,
+centered base-feature and readout-design covariance spectra/ranks/condition
+numbers, and explicit relative-global-feature-RMS noise coordinates.
+Deterministic repeat uncertainty, independent random-feature seed uncertainty,
+and prediction-ensemble noise results are written with distinct semantics and
+tables. The checked-in main profile is a plan only; no production result is
+claimed.
+
+`studies/learning_curve*.json` uses the canonical train split order to form
+strict nested prefixes. Each configured `n_train` is an experimental
+condition, not a test-selected candidate. The subset IDs, content hash,
+parent-train hash, policy, and version are bound into validation/test rows,
+selection records, frozen plans, and frozen model entries. Feature states are
+computed for the canonical train-plus-validation sample request and reused
+across prefix sizes; only readout fitting sees the shorter prefix. All sizes
+are frozen before any test access. The direct decoder is retained as an
+explicit training-size-invariant control, and random-feature seed statistics
+and prediction ensembles keep their existing separate semantics. The main
+sizes are `50,100,200,400,800,1000`, matching the configured 1000-sample
+canonical train split; this profile has not been executed.
+
+`studies/random_feature_seed_statistics*.json` fixes the Phase-3-selected
+Burgers feature condition and chooses random-feature width, scales, bias, and
+ridge coefficient using training/validation data only. Selection seeds and
+evaluation seeds are disjoint. The smoke profile has three independent
+evaluation realizations; the planned, unexecuted main profile has 32. Per-seed
+rows bind the random-map and complete frozen-member content hashes, evaluation-
+seed validation metrics that are explicitly marked as not used for selection,
+and learned-readout norms. The random-map hash joins those rows to the
+conditioning information in `readout_stability_models.csv`. Scatter, box, and
+empirical-CDF reporters read the completed CSV tables and do not interpolate
+the seed axis.
+
+The same study predeclares representative test sample IDs and explicit
+random-feature member seeds in `prediction_capture`. After the frozen archive
+has been read back and the canonical test pass has produced predictions,
+`prediction_capture.pt` stores finite inputs, finite/reference targets,
+target/prediction coefficients, `n_tar`/`n_ref` reconstructions, coefficient
+errors, and content identities. To avoid storing every full test prediction,
+it stores full fields only for the predeclared samples and stores
+per-coefficient/per-mode aggregates over the complete canonical test split.
+The aggregate definition, DC/cos/sin ordering, physical wavenumbers, and
+machine-epsilon zero-denominator policy are artifact fields.
 
 The implemented readout kinds are:
 
@@ -399,17 +490,53 @@ Important files include:
 - `dataset_reference.json`
 - `validation_trials.csv`
 - `selection_record.json`
+- nested-training subset IDs and hashes within the selection/freeze records
 - `convergence.csv`
 - `frozen_models.pt`
 - `frozen_evaluation_plan.json`
 - `test_metrics.csv`
 - `random_feature_seed_metrics.csv`
 - `random_feature_ensemble_metrics.csv`
-- diagnostic CSV files
+- optional `prediction_capture.pt`
+- `readout_stability_models.csv`
+- `readout_stability_noise_repeats.csv`
+- `readout_stability_noise_summary.csv`
+- separately labeled readout-stability prediction-ensemble CSV files
+- other diagnostic CSV files
 - `events.json`
 - `run_summary.json`
 - `figures/`
 - `manifest.json`
+
+Numerical tables and tensor captures are transactionally published and
+verified first. If plots are requested, a second transaction reads that
+verified completed run, produces figures, updates only report metadata and
+the manifest, and verifies the result again. Automatic post-run reporting and
+`--plots-only` use this same read-only path. A failed report transaction leaves
+the verified numerical run intact and does not restart solvers or readout
+inference.
+
+Cross-run reporting is a separate read-only artifact family. A strict
+`pol-report-v1` specification names at least two source study specifications
+and predeclares each split, metric, variant, readout, axis, and baseline row.
+Every exact content-addressed source run is verified before rendering.
+`phase_diagram_report` writes a cell-status table that distinguishes valid,
+missing, and reason-bearing invalid cells and rejects numerical NaN/Inf.
+`baseline_summary_table` keeps reference-field and finite-data errors in
+separate columns, carries both representation floors and all five dimensions,
+and reports Model 3 seed mean/standard deviation/Student-t interval without
+placing prediction-ensemble metrics in the primary columns. Reports are
+published under `outputs/reports/` with resolved specification, source
+references, unrounded machine-readable CSV, optional Markdown/LaTeX, figures,
+summary, and an exact-byte manifest. Source storage paths are excluded from
+the report identity.
+
+Production operation is documented in
+[`docs/production_runbook.md`](docs/production_runbook.md). Main execution is
+split into explicit stages, each guarded by `POL_CONFIRM_MAIN=YES`; there is no
+all-in-one main stage. `python3 scripts/plan_main.py` strict-parses and plans
+every main validation, dataset, study, and report without executing or
+publishing one.
 
 `events.json` records the durability boundary. In a valid run,
 `freeze_read_back` appears before `first_test_state_solve` and
@@ -427,21 +554,29 @@ accompanied by:
 <metric>_seed_std
 <metric>_seed_ci95_low
 <metric>_seed_ci95_high
+<metric>_seed_q25
+<metric>_seed_median
+<metric>_seed_q75
 ```
 
 The standard deviation uses Bessel's correction (`ddof=1`), and the two-sided
 95% interval for the arithmetic mean uses a Student-t quantile. Seed count,
-confidence level, and interval method are recorded in the primary row.
+confidence level, and interval method are recorded in the primary row. The
+linearly interpolated quartiles are descriptive distribution summaries and
+are explicitly not labeled as an uncertainty interval.
 
 `random_feature_seed_metrics.csv` contains one
-`independent_seed_realization` row per frozen evaluation seed.
+`independent_seed_realization` row per frozen evaluation seed, including its
+random-map hash, frozen-member hash, validation metric, selected structural
+hyperparameters and ridge coefficient, and readout norm fields.
 `random_feature_ensemble_metrics.csv` contains one separately labeled
 `prediction_ensemble` row per selected random-feature model; its metric names
 begin with `test_ensemble_`. Ensemble metrics are not copied into the canonical
-primary metric columns. `run_summary.json` records primary, per-seed, and
-ensemble row counts. `dataset_reference.json` stores the full dataset binding
-proof, while both it and `run_summary.json` expose the binding kind, binding
-status, target-reference validation status, and proof hash.
+primary metric columns. The ensemble row binds both the ordered seed hash and
+the ordered frozen-member hash. `run_summary.json` records primary, per-seed,
+and ensemble row counts. `dataset_reference.json` stores the full dataset
+binding proof, while both it and `run_summary.json` expose the binding kind,
+binding status, target-reference validation status, and proof hash.
 
 For every `direct_fourier_decoder` row, `validation_trials.csv` and
 `test_metrics.csv` publish:
@@ -467,8 +602,16 @@ the validation, selection, frozen, and test copies. `run_summary.json` records
 the selected direct-decoder diagnostic count, zero-fill count, and any-zero-
 fill flag.
 
-Study-run identity, manifest, summary, selection, and frozen-model schemas
-remain at `v5`, with study dataset-reference at `v3`. Validation
+Study configuration through `pol-study-v6` is accepted, and pure plans are
+`pol-study-plan-v3`. Newly written study-run identity, manifest, and summary
+schemas are respectively `v13`, `v14`, and `v14`, with explicit
+`pol-study-result-row-v3` validation/test rows. Older supported completed runs
+remain readable as selection sources. Selection remains `v8`; the frozen-plan
+and frozen-model schemas are `v9`, prediction captures use
+`pol-prediction-capture-v1`, and study dataset-reference remains at `v3`. Heat
+multiplier coefficient rows use
+`pol-heat-multiplier-coefficient-v2`, and case/readout summaries use
+`pol-heat-multiplier-summary-v1`. Validation
 configuration is `pol-validation-v6` for reaction-diffusion (existing v5
 heat/Burgers specs remain parseable for migration); Phase 2-05B advances
 validation identity/certificate to `v12`, adds
@@ -484,17 +627,43 @@ The foundation master binding remains at `v3`, initial-condition archives at
 artifacts are rejected rather than silently treated as carrying the
 Phase 2-05B semantics. Long-form primary and self-convergence rows use
 `pol-reference-convergence-row-v3`; the primary CSV is
-`pol-reference-convergence-csv-v3`. Package version `0.2.13` is recorded by
-numerical-environment schema `pol-numerical-environment-v2`.
+`pol-reference-convergence-csv-v3`. Cross-run configurations use
+`pol-report-v1`; identities, manifests, summaries, phase-map tables, and
+baseline tables use their corresponding `pol-*-v1` report schemas. Digital
+FNO configurations use `pol-digital-baseline-v1`; their identity, selection,
+frozen-checkpoint, frozen-plan, summary, and manifest families use
+corresponding `pol-digital-*-v1` schemas. Package version `0.2.23` is recorded
+by numerical-environment schema
+`pol-numerical-environment-v2`.
+
+The observation/output budget and input/simulation-resolution study bind both
+their Burgers and reaction-diffusion feature systems and evolution times to
+the corresponding validation-selected representative conditions in the
+completed parameter/time landscape. The binding verifies the exact completed
+source run and its selection/frozen artifacts and places path-independent
+source provenance in downstream identity, freeze artifacts, and result rows.
+Read-only inspection is available through:
+
+```bash
+python3 -m pol selection inspect studies/surrogate_parameter_time_landscape_smoke.json
+python3 -m pol selection verify studies/observation_output_budget_smoke.json
+python3 -m pol selection verify studies/input_simulation_resolution_smoke.json
+```
+
+These commands do not run a study or build a missing dependency. A pure plan
+reports `selection_dependencies.status="missing"` until the expected source
+run exists.
 
 ## Included profiles
 
 Smoke profiles are intentionally small and are used for integration checks:
 
 - `heat_readout_calibration_smoke.json`
-- `surrogate_parameter_time_smoke.json`
-- `observation_output_map_smoke.json`
-- `finite_surrogate_resolution_map_smoke.json`
+- `surrogate_parameter_time_coordinate_search_smoke.json`
+- `surrogate_parameter_time_landscape_smoke.json`
+- `observation_output_budget_smoke.json`
+- `input_simulation_resolution_smoke.json`
+- `digital_baselines/fno1d_smoke.json`
 
 Both Burgers and heat dataset profiles use `validated_reference`. Burgers
 binds to the Burgers convergence certificate; heat binds only to its
@@ -503,13 +672,31 @@ heat-specific analytic/spatial certificate and the exact
 diagnostic. Burgers main declares it disabled and has not been executed or
 cross-solver calibrated.
 
-The two phase diagrams are deliberately separate. The observation/output map
-varies `J × q` while holding `n_tar` and `n_sur` fixed. The finite/surrogate
-resolution map varies `n_tar × n_sur` while holding `J` and `q` fixed.
+The two phase diagrams are deliberately separate. The observation/output
+budget varies `J × q` while holding `n_tar` and `n_sur` fixed. Its checked-in
+scope is exactly the Burgers and reaction-diffusion feature variants, and it
+produces separate validation maps for direct, affine, and random-feature
+readouts. Its predeclared per-cell test values evaluate the budget axes and
+do not select a cell. The completed summary distinguishes global-axis
+combinations from variant-expanded planned/evaluated/skipped case counts. The
+`input_simulation_resolution` map varies `n_tar × n_sur` while holding `J`
+and `q` fixed. It uses the same two Phase 3-selected feature variants and the
+direct, affine, and random-feature readouts, but has its own study and run
+identity.
+
+The surrogate-parameter coordinate search and complete Cartesian landscape
+are also separate studies. The former alternates the `nu` and readout-time
+axes as an efficient search aid. The latter evaluates every predeclared
+`nu × time` cell for heat, Burgers, and reaction-diffusion features, records
+the validation-selected representative feature condition, and renders
+validation-only `metric_map` figures with the selected cell marked.
 
 The corresponding non-smoke profiles retain the high-resolution research
 settings. They can require substantial CPU time, storage, and memory and are
-not run by the test suite.
+not run by the test suite. The main FNO plan declares two architecture
+candidates, five selection seeds, ten evaluation seeds, 100 epochs/model, and
+a 64,000 optimizer-step upper bound. It has not been executed, and no main
+landscape or digital-baseline result is claimed here.
 
 ## Tests
 
@@ -535,6 +722,12 @@ quadrature certificate tamper detection; foundation validation; dataset
 splitting; unified scalar/sweep planning; selection freezing; test-order
 enforcement; plot regeneration; CLI behavior; and the absence of
 publication-number namespaces from the core package.
+Focused digital-baseline tests additionally cover strict CPU configuration,
+finite-input-only FNO execution, missing-source preflight, validation-only
+selection, freeze/read-back before test access, checkpoint tamper rejection,
+independent training-seed statistics, separate prediction ensembles,
+deterministic smoke metrics, shared metric implementation, and absence of a
+physical-study dependency on the digital adapter.
 
 For a complete local smoke sequence:
 

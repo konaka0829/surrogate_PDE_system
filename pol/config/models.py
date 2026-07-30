@@ -675,11 +675,18 @@ ReadoutSpec = Annotated[
 ]
 
 
+class NestedTrainPrefixSpec(StrictModel):
+    kind: Literal["nested_train_prefix"] = "nested_train_prefix"
+    n_train: PositiveInt
+    policy_version: Literal[1] = 1
+
+
 class TrialSpec(StrictModel):
     input: FiniteInputSpec
     feature: FeatureGeneratorSpec
     output: FourierOutputSpec
     readouts: tuple[ReadoutSpec, ...]
+    training_subset: NestedTrainPrefixSpec | None = None
 
     @model_validator(mode="after")
     def _trial(self) -> "TrialSpec":
@@ -701,6 +708,12 @@ class SweepAxisSpec(StrictModel):
     def _values(self) -> "SweepAxisSpec":
         if not self.values:
             raise ValueError("sweep axis values must not be empty")
+        if any(
+            value == earlier
+            for index, value in enumerate(self.values)
+            for earlier in self.values[:index]
+        ):
+            raise ValueError("sweep axis values must be unique")
         return self
 
 
@@ -716,6 +729,8 @@ class GridSearchSpec(StrictModel):
     def _axes(self) -> "GridSearchSpec":
         if not self.axes:
             raise ValueError("grid search requires at least one axis")
+        if len({axis.path for axis in self.axes}) != len(self.axes):
+            raise ValueError("grid search axis paths must be unique")
         return self
 
 
@@ -728,6 +743,14 @@ class CoordinateAxisSpec(StrictModel):
     def _values(self) -> "CoordinateAxisSpec":
         if not self.values:
             raise ValueError("coordinate axis values must not be empty")
+        if any(
+            value == earlier
+            for index, value in enumerate(self.values)
+            for earlier in self.values[:index]
+        ):
+            raise ValueError("coordinate axis values must be unique")
+        if self.anchor not in self.values:
+            raise ValueError("coordinate axis anchor must be one of its values")
         return self
 
 
@@ -736,6 +759,12 @@ class CoordinateSearchSpec(StrictModel):
     axes: tuple[CoordinateAxisSpec, CoordinateAxisSpec]
     rounds: int = Field(default=0, ge=0)
 
+    @model_validator(mode="after")
+    def _axes(self) -> "CoordinateSearchSpec":
+        if self.axes[0].path == self.axes[1].path:
+            raise ValueError("coordinate search axis paths must be unique")
+        return self
+
 
 SearchSpec = Annotated[
     Union[StaticSearchSpec, GridSearchSpec, CoordinateSearchSpec],
@@ -743,11 +772,78 @@ SearchSpec = Annotated[
 ]
 
 
+SelectionImportPath = Literal[
+    "feature.evolution.system",
+    "feature.evolution.time",
+]
+
+
+class CompletedStudySelectionSourceSpec(StrictModel):
+    kind: Literal["completed_study_selection"] = "completed_study_selection"
+    source_study_spec: Path
+    source_variant_id: str = Field(min_length=1)
+    source_readout_id: str = Field(min_length=1)
+    import_paths: tuple[SelectionImportPath, ...]
+
+    @model_validator(mode="after")
+    def _imports(self) -> "CompletedStudySelectionSourceSpec":
+        if not self.import_paths:
+            raise ValueError("selection-source import_paths must not be empty")
+        if len(set(self.import_paths)) != len(self.import_paths):
+            raise ValueError("selection-source import_paths must be unique")
+        return self
+
+
 class VariantSpec(StrictModel):
     id: str
     display_name: str | None = None
+    selection_source: CompletedStudySelectionSourceSpec | None = None
     overrides: dict[str, JsonValue] = Field(default_factory=dict)
     search: SearchSpec = Field(default_factory=StaticSearchSpec)
+
+
+FeatureFamily = Literal[
+    "static_input",
+    "heat",
+    "burgers",
+    "reaction_diffusion",
+]
+
+
+class DynamicFeatureBaselineComparisonSpec(StrictModel):
+    """Declare the fairness boundary for static/dynamic feature comparisons."""
+
+    kind: Literal["dynamic_feature_baseline"] = "dynamic_feature_baseline"
+    feature_families: dict[str, FeatureFamily]
+
+    @model_validator(mode="after")
+    def _families(self) -> "DynamicFeatureBaselineComparisonSpec":
+        expected = {
+            "static_input",
+            "heat",
+            "burgers",
+            "reaction_diffusion",
+        }
+        if set(self.feature_families.values()) != expected:
+            raise ValueError(
+                "dynamic-feature baseline comparison requires exactly one "
+                "static_input, heat, burgers, and reaction_diffusion family"
+            )
+        if len(self.feature_families) != len(expected):
+            raise ValueError(
+                "dynamic-feature baseline comparison families must be unique"
+            )
+        return self
+
+
+class LearningCurveStudySpec(StrictModel):
+    kind: Literal["learning_curve"] = "learning_curve"
+    training_axis_path: Literal["training_subset.n_train"] = (
+        "training_subset.n_train"
+    )
+    subset_policy: Literal["canonical_train_order_prefix_v1"] = (
+        "canonical_train_order_prefix_v1"
+    )
 
 
 class SelectionSpec(StrictModel):
@@ -789,24 +885,44 @@ class ConvergenceSpec(StrictModel):
 
 class HeatMultiplierDiagnosticSpec(StrictModel):
     kind: Literal["heat_multiplier"] = "heat_multiplier"
-    identifiable_variance_floor: float = Field(default=1e-14, ge=0)
+    identifiable_multiplier_floor: float = Field(default=1e-14, ge=0)
 
 
-class NoiseDiagnosticSpec(StrictModel):
-    kind: Literal["noise_robustness"] = "noise_robustness"
+class RelativeGlobalFeatureRMSNoiseSpec(StrictModel):
+    kind: Literal["relative_global_feature_rms"] = (
+        "relative_global_feature_rms"
+    )
+
+
+class ReadoutStabilityNoiseDiagnosticSpec(StrictModel):
+    kind: Literal["readout_stability_noise"] = "readout_stability_noise"
     levels: tuple[float, ...]
     repeats: PositiveInt
     seed: int
+    scaling: RelativeGlobalFeatureRMSNoiseSpec = Field(
+        default_factory=RelativeGlobalFeatureRMSNoiseSpec
+    )
+    common_random_numbers: Literal[True] = True
+    include_prediction_ensemble: bool = True
+    covariance_rcond: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
-    def _levels(self) -> "NoiseDiagnosticSpec":
-        if not self.levels or any(value < 0 for value in self.levels):
+    def _levels(self) -> "ReadoutStabilityNoiseDiagnosticSpec":
+        if not self.levels or any(
+            not math.isfinite(value) or value < 0 for value in self.levels
+        ):
             raise ValueError("noise levels must be nonempty and nonnegative")
+        if self.levels[0] != 0.0:
+            raise ValueError("readout stability levels must start with clean level 0")
+        if len(set(self.levels)) != len(self.levels):
+            raise ValueError("noise levels must be unique")
+        if self.repeats < 2:
+            raise ValueError("readout stability requires at least two repeats")
         return self
 
 
 DiagnosticSpec = Annotated[
-    Union[HeatMultiplierDiagnosticSpec, NoiseDiagnosticSpec],
+    Union[HeatMultiplierDiagnosticSpec, ReadoutStabilityNoiseDiagnosticSpec],
     Field(discriminator="kind"),
 ]
 
@@ -824,28 +940,114 @@ class MetricCurveReporterSpec(StrictModel):
     dpi: PositiveInt = 120
 
 
-class ResolutionMapReporterSpec(StrictModel):
-    kind: Literal["resolution_map"] = "resolution_map"
+class MetricMapReporterSpec(StrictModel):
+    kind: Literal["metric_map"] = "metric_map"
     filename: str
     x: str
     y: str
+    x_values: tuple[float, ...]
+    y_values: tuple[float, ...]
     metric: str
-    split: Literal["validation", "test"] = "validation"
+    split: Literal["validation"] = "validation"
     readout_id: str
+    variant_id: str | None = None
+    mark_selected: bool = False
     formats: tuple[Literal["png", "pdf"], ...] = ("png",)
     dpi: PositiveInt = 120
 
+    @model_validator(mode="after")
+    def _axes(self) -> "MetricMapReporterSpec":
+        for name, values in (
+            ("x_values", self.x_values),
+            ("y_values", self.y_values),
+        ):
+            if not values:
+                raise ValueError(f"{name} must not be empty")
+            if not all(math.isfinite(float(value)) for value in values):
+                raise ValueError(f"{name} must contain only finite values")
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} must contain unique values")
+        return self
 
-class NoiseCurveReporterSpec(StrictModel):
-    kind: Literal["noise_curve"] = "noise_curve"
+
+class ReadoutStabilityReporterSpec(StrictModel):
+    kind: Literal["readout_stability"] = "readout_stability"
     filename: str
+    plot: Literal["noise_curve", "error_vs_norm", "condition_vs_error"]
     metric: str = "field_relative_l2_mean"
     formats: tuple[Literal["png", "pdf"], ...] = ("png",)
     dpi: PositiveInt = 120
 
 
+class LearningCurveReporterSpec(StrictModel):
+    kind: Literal["learning_curve"] = "learning_curve"
+    filename: str
+    metric: str = "test_field_relative_l2_mean"
+    split: Literal["validation", "test"] = "test"
+    group_by: tuple[str, ...] = ("variant_id", "readout_id")
+    xscale: Literal["log"] = "log"
+    yscale: Literal["linear", "log"] = "log"
+    formats: tuple[Literal["png", "pdf"], ...] = ("png",)
+    dpi: PositiveInt = 120
+
+
+class RandomFeatureSeedDistributionReporterSpec(StrictModel):
+    kind: Literal["random_feature_seed_distribution"] = (
+        "random_feature_seed_distribution"
+    )
+    filename: str
+    plot: Literal["scatter", "box", "empirical_cdf"]
+    metric: str = "test_field_relative_l2_mean"
+    group_by: tuple[str, ...] = ("variant_id", "readout_id")
+    yscale: Literal["linear", "log"] = "log"
+    formats: tuple[Literal["png", "pdf"], ...] = ("png",)
+    dpi: PositiveInt = 120
+
+
+class RepresentativePredictionFieldsReporterSpec(StrictModel):
+    kind: Literal["representative_prediction_fields"] = (
+        "representative_prediction_fields"
+    )
+    filename: str
+    formats: tuple[Literal["png", "pdf"], ...] = ("png",)
+    dpi: PositiveInt = 120
+
+
+class FourierErrorSpectraReporterSpec(StrictModel):
+    kind: Literal["fourier_error_spectra"] = "fourier_error_spectra"
+    filename: str
+    metric: Literal[
+        "per_mode_squared_error_sample_mean",
+        "per_mode_relative_energy_error",
+    ] = "per_mode_squared_error_sample_mean"
+    x_axis: Literal["mode_index", "physical_wavenumber"] = "mode_index"
+    yscale: Literal["linear", "log"] = "log"
+    formats: tuple[Literal["png", "pdf"], ...] = ("png",)
+    dpi: PositiveInt = 120
+
+
+class HeatMultiplierComparisonReporterSpec(StrictModel):
+    kind: Literal["heat_multiplier_comparison"] = (
+        "heat_multiplier_comparison"
+    )
+    filename: str
+    readout_id: str = "affine"
+    q: PositiveInt | None = None
+    formats: tuple[Literal["png", "pdf"], ...] = ("png",)
+    dpi: PositiveInt = 120
+
+
 ReporterSpec = Annotated[
-    Union[MetricCurveReporterSpec, ResolutionMapReporterSpec, NoiseCurveReporterSpec],
+    Union[
+        MetricCurveReporterSpec,
+        MetricMapReporterSpec,
+        ReadoutStabilityReporterSpec,
+        LearningCurveReporterSpec,
+        RandomFeatureSeedDistributionReporterSpec,
+        RepresentativePredictionFieldsReporterSpec,
+        FourierErrorSpectraReporterSpec,
+        HeatMultiplierComparisonReporterSpec,
+    ],
     Field(discriminator="kind"),
 ]
 
@@ -858,8 +1060,55 @@ class ExecutionSpec(StrictModel):
     generate_plots: bool = True
 
 
+class ExplicitRandomFeatureMembersCaptureSpec(StrictModel):
+    kind: Literal["explicit_seeds"] = "explicit_seeds"
+    seeds: tuple[int, ...]
+
+    @model_validator(mode="after")
+    def _explicit_seeds(self) -> "ExplicitRandomFeatureMembersCaptureSpec":
+        if not self.seeds:
+            raise ValueError("prediction capture seeds must not be empty")
+        if len(set(self.seeds)) != len(self.seeds):
+            raise ValueError("prediction capture seeds must be unique")
+        return self
+
+
+class PredictionCaptureSpec(StrictModel):
+    kind: Literal["predeclared_test_predictions"] = (
+        "predeclared_test_predictions"
+    )
+    sample_ids: tuple[int, ...]
+    sample_selection_policy: Literal["predeclared_test_ids"] = (
+        "predeclared_test_ids"
+    )
+    readout_ids: tuple[str, ...]
+    random_feature_members: ExplicitRandomFeatureMembersCaptureSpec
+    include_ensemble: bool = True
+
+    @model_validator(mode="after")
+    def _capture(self) -> "PredictionCaptureSpec":
+        if not self.sample_ids or any(value < 0 for value in self.sample_ids):
+            raise ValueError(
+                "prediction capture sample_ids must be nonempty and nonnegative"
+            )
+        if len(set(self.sample_ids)) != len(self.sample_ids):
+            raise ValueError("prediction capture sample_ids must be unique")
+        if not self.readout_ids or len(set(self.readout_ids)) != len(
+            self.readout_ids
+        ):
+            raise ValueError(
+                "prediction capture readout_ids must be nonempty and unique"
+            )
+        return self
+
+
 class StudySpec(StrictModel):
-    schema_version: Literal["pol-study-v1"] = "pol-study-v1"
+    schema_version: Literal[
+        "pol-study-v3",
+        "pol-study-v4",
+        "pol-study-v5",
+        "pol-study-v6",
+    ] = "pol-study-v6"
     name: str
     output_root: Path = Path("outputs/studies")
     artifact_root: Path = Path("artifacts")
@@ -867,6 +1116,9 @@ class StudySpec(StrictModel):
     dataset_spec: Path
     base_trial: TrialSpec
     variants: tuple[VariantSpec, ...]
+    comparison: DynamicFeatureBaselineComparisonSpec | None = None
+    learning_curve: LearningCurveStudySpec | None = None
+    prediction_capture: PredictionCaptureSpec | None = None
     global_axes: tuple[SweepAxisSpec, ...] = ()
     selection: SelectionSpec
     convergence: ConvergenceSpec | None = None
@@ -889,4 +1141,171 @@ class StudySpec(StrictModel):
                 sample_id < 0 for sample_id in self.convergence.sample_ids
             ):
                 raise ValueError("convergence sample ids must be nonnegative")
+        diagnostic_kinds = [diagnostic.kind for diagnostic in self.diagnostics]
+        if len(diagnostic_kinds) != len(set(diagnostic_kinds)):
+            raise ValueError("diagnostic kinds must be unique")
+        comparison = self.comparison
+        if comparison is not None:
+            if self.schema_version != "pol-study-v4":
+                raise ValueError(
+                    "dynamic-feature comparison requires schema_version=pol-study-v4"
+                )
+            if set(comparison.feature_families) != set(variant_ids):
+                raise ValueError(
+                    "comparison feature_families must exactly match variant ids"
+                )
+            forbidden_paths = {
+                "input.n_tar",
+                "feature.n_sur",
+                "feature.observation",
+                "feature.observation.J",
+                "feature.observation.kind",
+                "feature.observation.l2_scale",
+                "output.q",
+                "readouts",
+            }
+            axis_paths = {axis.path for axis in self.global_axes}
+            if axis_paths & forbidden_paths:
+                raise ValueError(
+                    "dynamic-feature baseline comparison cannot vary the shared "
+                    "information budget or readout contract"
+                )
+            for variant in self.variants:
+                family = comparison.feature_families[variant.id]
+                if not isinstance(variant.search, StaticSearchSpec):
+                    raise ValueError(
+                        "feature conditions must be fixed before the baseline "
+                        "comparison; variant searches must be static"
+                    )
+                if set(variant.overrides) & forbidden_paths:
+                    raise ValueError(
+                        "dynamic-feature baseline variants cannot override the "
+                        "shared information budget or readout contract"
+                    )
+                if family == "static_input":
+                    if variant.selection_source is not None:
+                        raise ValueError(
+                            "static_input must use an explicit static marker, "
+                            "not a completed-study selection source"
+                        )
+                    if (
+                        variant.overrides.get("feature.kind") != "static_input"
+                        or variant.overrides.get("feature.evolution", object())
+                        is not None
+                    ):
+                        raise ValueError(
+                            "static_input must explicitly set feature.kind and "
+                            "clear feature.evolution"
+                        )
+                else:
+                    source = variant.selection_source
+                    if source is None:
+                        raise ValueError(
+                            "every dynamic baseline family requires a verified "
+                            "completed-study selection source"
+                        )
+                    if source.source_variant_id != family:
+                        raise ValueError(
+                            "dynamic baseline family does not match its source "
+                            "variant"
+                        )
+                    if set(source.import_paths) != {
+                        "feature.evolution.system",
+                        "feature.evolution.time",
+                    }:
+                        raise ValueError(
+                            "dynamic baseline sources must import both the "
+                            "feature system and time"
+                        )
+                    imported_system = variant.overrides.get(
+                        "feature.evolution.system"
+                    )
+                    if (
+                        isinstance(imported_system, dict)
+                        and imported_system.get("kind") != family
+                    ):
+                        raise ValueError(
+                            "resolved dynamic baseline system does not match "
+                            "the declared feature family"
+                        )
+        learning_curve = self.learning_curve
+        if learning_curve is not None:
+            if self.schema_version != "pol-study-v5":
+                raise ValueError(
+                    "learning_curve requires schema_version=pol-study-v5"
+                )
+            if self.comparison is not None:
+                raise ValueError(
+                    "learning_curve and dynamic-feature comparison contracts "
+                    "cannot be combined"
+                )
+            if self.base_trial.training_subset is None:
+                raise ValueError(
+                    "learning_curve requires a nested training subset"
+                )
+            if len(self.global_axes) != 1 or (
+                self.global_axes[0].path != learning_curve.training_axis_path
+            ):
+                raise ValueError(
+                    "learning_curve global axis must be "
+                    "training_subset.n_train"
+                )
+            sizes = [int(value) for value in self.global_axes[0].values]
+            if sizes != sorted(sizes):
+                raise ValueError(
+                    "learning_curve training sizes must be increasing"
+                )
+            forbidden = {"training_subset", "training_subset.n_train"}
+            for variant in self.variants:
+                if set(variant.overrides) & forbidden:
+                    raise ValueError(
+                        "learning_curve variants cannot override the nested "
+                        "training subset"
+                    )
+                if not isinstance(variant.search, StaticSearchSpec):
+                    raise ValueError(
+                        "learning_curve train sizes are fixed conditions; "
+                        "variant searches must be static"
+                    )
+        capture = self.prediction_capture
+        capture_reporter_kinds = {
+            "representative_prediction_fields",
+            "fourier_error_spectra",
+        }
+        configured_reporter_kinds = {
+            reporter.kind for reporter in self.reporters
+        }
+        if capture is None:
+            if configured_reporter_kinds & capture_reporter_kinds:
+                raise ValueError(
+                    "prediction reporters require prediction_capture"
+                )
+        else:
+            if self.schema_version != "pol-study-v6":
+                raise ValueError(
+                    "prediction_capture requires schema_version=pol-study-v6"
+                )
+            unknown_readouts = set(capture.readout_ids) - readout_ids
+            if unknown_readouts:
+                raise ValueError(
+                    "prediction capture references unknown readout ids"
+                )
+            random_readouts = [
+                readout
+                for readout in self.base_trial.readouts
+                if readout.id in capture.readout_ids
+                and isinstance(readout, RandomFeatureRidgeReadoutSpec)
+            ]
+            if not random_readouts:
+                raise ValueError(
+                    "prediction capture explicit seeds require a captured "
+                    "random-feature readout"
+                )
+            requested_seeds = set(capture.random_feature_members.seeds)
+            for readout in random_readouts:
+                if not requested_seeds <= set(readout.evaluation_seeds):
+                    raise ValueError(
+                        "prediction capture seeds must be frozen evaluation "
+                        "seeds for every captured random-feature readout"
+                    )
         return self

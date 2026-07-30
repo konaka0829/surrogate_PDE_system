@@ -27,6 +27,7 @@ from .readouts import (
     frozen_readout_diagnostic,
     predict_frozen,
 )
+from .training_subsets import resolve_training_subset
 
 
 class TrialEngine:
@@ -49,7 +50,7 @@ class TrialEngine:
         self.selection_ids = torch.cat(
             [dataset.train_ids, dataset.validation_ids]
         ).to(torch.long)
-        self.n_train = int(dataset.train_ids.numel())
+        self.canonical_n_train = int(dataset.train_ids.numel())
         self._finite_cache: dict[tuple[str, int, int], FiniteDataView] = {}
         self._candidate_cache: dict[str, CandidateEvaluation] = {}
         verify_execution_device_policy(
@@ -98,6 +99,18 @@ class TrialEngine:
             return self._candidate_cache[candidate_id]
         finite = self._finite(self.selection_ids, trial)
         state = self.cache.get_or_solve(self.dataset, self.selection_ids, trial)
+        training_ids, training_subset = resolve_training_subset(
+            self.dataset,
+            trial,
+        )
+        if not torch.equal(
+            training_ids,
+            self.selection_ids[: int(training_ids.numel())],
+        ):
+            raise ValueError(
+                "nested training subset does not match the canonical prefix"
+            )
+        n_train = int(training_ids.numel())
         features = observe_equispaced_periodic(
             state.values,
             int(trial.feature.observation.J),
@@ -115,12 +128,14 @@ class TrialEngine:
             boundary="readout selection inputs",
             name="selection",
         )
-        x_train = features[: self.n_train]
-        x_validation = features[self.n_train :]
-        y_train = finite.target_coefficients[: self.n_train]
-        y_validation = finite.target_coefficients[self.n_train :]
-        target_validation = finite.targets[self.n_train :]
-        target_reference_validation = finite.targets_reference[self.n_train :]
+        x_train = features[:n_train]
+        x_validation = features[self.canonical_n_train :]
+        y_train = finite.target_coefficients[:n_train]
+        y_validation = finite.target_coefficients[self.canonical_n_train :]
+        target_validation = finite.targets[self.canonical_n_train :]
+        target_reference_validation = finite.targets_reference[
+            self.canonical_n_train :
+        ]
         floor = representation_floor(
             y_validation,
             target_validation,
@@ -153,9 +168,11 @@ class TrialEngine:
                 readout_id=readout.id,
                 readout_kind=readout.kind,
                 trial=trial,
+                frozen_model=fitted.frozen_model,
                 readout_values=fitted.validation_values,
                 inner_selection=fitted.inner_selection,
                 floor_metrics=floor,
+                training_subset=training_subset,
             )
             rows[readout.id] = validation.row
             frozen[readout.id] = fitted.frozen_model
@@ -167,6 +184,7 @@ class TrialEngine:
             frozen_models=frozen,
             inner_selections=selections,
             feature_cache_id=state.cache_id,
+            training_subset=training_subset,
         )
         self._candidate_cache[candidate_id] = result
         return result
@@ -180,6 +198,7 @@ class TrialEngine:
         candidate_id: str,
     ) -> TestEvaluation:
         ids = self.dataset.test_ids.to(torch.long)
+        _, training_subset = resolve_training_subset(self.dataset, trial)
         finite = self._finite(ids, trial)
         state = self.cache.get_or_solve(self.dataset, ids, trial)
         features = observe_equispaced_periodic(
@@ -222,7 +241,7 @@ class TrialEngine:
         )
         return build_test_evaluation(
             predictions,
-            model_kind=str(model["kind"]),
+            model=model,
             candidate_id=candidate_id,
             readout_id=readout_id,
             trial=trial,
@@ -235,4 +254,5 @@ class TrialEngine:
             domain_length=self.dataset.domain_length,
             floor_metrics=floor,
             direct_diagnostic=direct_diagnostic,
+            training_subset=training_subset,
         )

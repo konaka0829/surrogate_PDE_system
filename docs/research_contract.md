@@ -376,9 +376,426 @@ the Bessel-corrected sample standard deviation
 \(\bar m \mathbin{\pm} t_{0.975,S-1}s/\sqrt{S}\). Interval endpoints are not
 clamped.
 
+The same per-seed table also records the median and 0.25/0.75 quantiles using
+linear interpolation. These are descriptive summaries of the realized seed
+distribution, not uncertainty intervals for the mean. Each evaluation
+realization binds a content hash of its seed, random-map tensors, activation,
+and scales, plus a content hash of that map and its fitted affine readout.
+Evaluation-seed validation metrics may be recorded after the structural
+hyperparameters have been selected, but they are marked as not used for
+selection and cannot change width, scales, bias, or ridge coefficient.
+
 Averaging predictions over seeds defines an ensemble model. Ensemble metrics
 may be reported as a separate result, but they must not be labeled or used as
-the primary independent-realization result.
+the primary independent-realization result. Its row binds the ordered member
+count, seed hash, and complete frozen-member hash.
+
+The `random_feature_seed_statistics` study uses the same trial/freeze/test
+path as other studies. It does not introduce a Model-3-specific runner.
+Per-seed random-map hashes join test metrics to learned-map norms and
+readout-design covariance conditioning in `readout_stability_models.csv`.
+Seed scatter has no connecting line; box and empirical-CDF views also read
+only verified completed result tables. The checked-in main profile declares
+32 evaluation seeds but has not been executed.
+
+## Prediction capture and read-only reporting
+
+Representative prediction samples and random-feature members are scientific
+coordinates, not post-hoc display choices. A prediction-capture specification
+therefore lists test sample IDs, readout IDs, and explicit evaluation seeds
+before selection and test access. Runtime preflight checks test membership
+before selection begins. Best, worst, typical, median-performing, or otherwise
+test-selected samples/members are not supported capture kinds. A prediction
+ensemble is captured only under its separate `prediction_ensemble` semantics.
+
+The capture is built after selection/frozen-plan/archive persistence and
+read-back, from the `FrozenPredictions` objects already produced by the
+canonical test pass. It does not invoke a second solver or readout inference.
+For predeclared samples it stores the finite `n_tar` input, target fields on
+`n_tar` and `n_ref`, target and predicted `q` coefficients, synthesized
+predictions on both grids, and coefficient errors. Every entry binds the
+dataset/split, selection record, frozen plan/archive, feature condition, model
+key, readout semantics, and, for a member, its explicit seed and member hash.
+
+For spectra, storage uses full-test per-coefficient aggregates rather than all
+full prediction fields. Mode zero is the DC coefficient. Each positive mode
+combines its cosine and sine squared errors and target energies. The sample
+aggregate is the arithmetic mean over the unchanged canonical test split;
+relative energy error divides those two aggregates with a dtype-machine-
+epsilon denominator clamp. Mode indices and physical angular wavenumbers
+`2*pi*m/L` are both stored. Completed-run verification checks content hashes,
+tensor reconstruction/error identities, spectrum aggregation, frozen
+coordinates, and agreement with canonical deterministic/member/ensemble
+coefficient-MSE rows.
+
+Publication is two-stage. The numerical run is transactionally published and
+verified with no figures. Optional reporting then copies that verified run
+into a separate transaction, reads CSV/tensor artifacts, writes figures, and
+verifies the updated exact-byte manifest. Automatic reporting and
+`--plots-only` call the same primitive. Reporter failure cannot replace or
+remove the verified numerical run, and reporter code must never call feature
+solvers, readout fitting, or frozen-model inference.
+
+## Cross-run read-only reports
+
+A cross-run report is not a study and does not enter unified study execution.
+Its strict `pol-report-v1` declaration names at least two source study
+specifications. Each source is resolved to its exact content-addressed
+completed run, including any completed-selection dependencies, and
+`verify_study_run` succeeds before a report transaction or renderer starts.
+The report path cannot build validation/dataset artifacts, solve a feature
+system, fit a readout, perform test inference, execute an upstream study, or
+modify source bytes.
+
+Every phase-diagram declaration fixes the source, split, metric, variant,
+readout, two semantic axes, complete axis values, physical labels, and axis
+scales. Validation and test rows are never pooled. A numerical NaN/Inf is an
+error; it is not encoded as a missing cell. A missing verified row and a
+predeclared invalid cell with a recorded reason remain distinct machine-table
+statuses. A validation-selected cell is marked only when the declaration
+explicitly requests it, and source run/condition hashes accompany the cell
+table.
+
+A baseline-table declaration fixes every variant/readout row before reading
+test results. Reference-field and finite-`n_tar` data-field metrics and their
+representation floors occupy separate columns. Random-feature primary values
+must be the independent-member seed mean and retain the Bessel-corrected
+standard deviation, Student-t confidence interval, method, level, and seed
+count. Prediction-ensemble rows are not eligible for primary columns.
+Unrounded machine-readable CSV is written before optional Markdown/LaTeX
+formatting.
+
+The report identity includes the semantic report declaration, exact source
+run/scientific/manifest and freeze hashes, and reporting software
+environment. It excludes storage locations. Reports are staged and
+transactionally published with `resolved_report_spec.json`,
+`source_references.json`, machine tables, figures/formatted tables,
+`report_summary.json`, and an exact-byte `pol-report-manifest-v1`. Failed
+rendering preserves any prior verified report.
+
+## Digital neural-operator baseline adapter
+
+The 1D Fourier neural operator is a digital baseline adapter, not a physical
+feature readout and not a `StudyRunner` variant. `pol.digital_baselines` owns
+its optimization, validation checkpoint selection, frozen checkpoints,
+training logs, test evaluation, and transactional publication. The physical
+study package does not import this adapter.
+
+The adapter reuses one exact validated `ReferenceDataset`, its canonical
+train/validation/test split, the finite-interface constructor, and the same
+Fourier coefficient/data-field/reference-field metrics used by physical
+studies. Its public interface is
+
+```text
+finite input field on n_tar plus a dimensionless periodic coordinate
+    -> FNO1d spectral/local layers on n_tar
+    -> finite output field on n_tar
+    -> q real L2-orthonormal Fourier coefficients
+```
+
+The FNO never receives the dataset's `n_ref` input field. The reference target
+is used only after prediction for the configured reference-field quadrature;
+the finite `n_tar` data-field metric and both representation floors remain
+separate. The current strict interface requires odd `q`, `q <= n_tar`, and an
+FNO mode count no larger than the finite `n_tar` RFFT width. It introduces no
+`n_tar <= J` or `q <= J` condition and does not own `n_sur` or `J`.
+
+Input and coefficient standard-score statistics are fitted from the canonical
+train split only. Candidate architecture and epoch checkpoints are selected
+with `validation_field_relative_l2_mean`. Configured selection seeds compare
+architectures; a disjoint configured evaluation-seed set is trained only
+after the architecture choice. Each evaluation seed is an independent neural
+network realization with its own validation-selected epoch checkpoint.
+
+Before requesting the finite test view or computing a test metric, the adapter
+writes and hashes its validation-only selection record, writes the frozen
+evaluation-seed checkpoints and evaluation plan, hashes their exact bytes and
+tensor contents, and reads all three back. The event log and completed-run
+verifier enforce this order. The primary test row aggregates per-seed metrics
+using the same Bessel-corrected standard deviation and two-sided 95%
+Student-t interval as Model 3. Prediction averaging is a separately labeled
+ensemble table.
+
+Every run first resolves an exact verified
+`dynamic_feature_baseline_comparison` source without executing it. The
+predeclared fairness table requires the same dataset, split, `n_tar`, and `q`;
+records input/output dimension, model parameter count, validation selection
+metric, separate field/data metrics and floors, seed statistics, and the
+distinct inference paths. Digital training wall/process time is recorded, but
+energy is not measured and physical/digital wall-clock or energy comparison is
+explicitly disallowed without a common measurement protocol.
+
+`pol-digital-baseline-v1` configurations and
+`pol-digital-baseline-run-manifest-v1` outputs are content addressed with
+storage paths excluded from identity, transactionally published, and
+exact-byte plus semantic/tensor-hash verified. The checked-in smoke profile is
+an execution-path check only. The checked-in main training budget has not been
+executed and establishes no FNO performance claim.
+
+## Readout stability under feature noise
+
+The `readout_stability_noise` diagnostic runs only after the selection record
+and frozen evaluation plan have been written, hashed, and read back. Every
+diagnostic row binds the selection hash, frozen-plan hash, and frozen archive
+model key. Noise level is relative to the global RMS of the clean observed
+feature matrix, and the saved coordinates include the resulting RMS, draw
+seed, repeat index, and sample shape. Common random-number seeds are reused
+across frozen evaluation-seed members at a given level and repeat.
+
+For deterministic readouts, metrics are retained per noise repeat and
+summarized with a Bessel-corrected standard deviation and Student-t 95%
+interval. For random-feature readouts, repeats are first summarized within
+each independently frozen evaluation seed; the primary stability result then
+aggregates those per-seed means across seeds. Prediction averaging is stored
+only in separately labeled ensemble tables. Fixed direct decoders report
+readout norms as not applicable. Learned affine and random-feature members
+record `W` Frobenius/operator norms, bias norm, selected ridge coefficient,
+and centered covariance singular values, numerical rank, cutoff, raw
+condition, and retained-rank condition. A rank-deficient raw condition remains
+infinite rather than being replaced by a finite surrogate.
+
+## Nested-prefix learning curves
+
+A learning-curve training condition is
+`nested_train_prefix(n_train)` under
+`canonical_train_order_prefix_v1`. It selects exactly the first `n_train`
+IDs of the existing canonical train order. It neither creates a new dataset
+artifact nor changes validation or test membership. Direct configuration of
+arbitrary subset IDs is not part of this kind. Sizes must be positive,
+increasing, unique, and no larger than the canonical train count.
+
+Every subset record stores its ordered IDs, ID hash, parent-train hash,
+validation hash, count, policy/version, and content hash. The record is copied
+into the validation result, selection record, frozen plan, frozen model
+archive, and test result and is verified across those boundaries. All
+configured sizes complete validation-only readout selection and archive
+read-back before the first test feature request. Test error is therefore an
+evaluation coordinate, never a train-size selection signal.
+
+Feature generation remains independent of training-subset size. For a fixed
+dataset and feature condition, the selection feature request uses the full
+canonical train IDs followed by the fixed validation IDs; readout fitting
+then slices the requested prefix. This makes cache reuse across sizes exact
+without erasing the training-subset identity of the fitted model. The direct
+decoder must consequently have identical test metrics across sizes and is
+not described as trained.
+
+## Analytic heat-readout calibration
+
+The `heat_readout_calibration` study compares under-diffusive, matched, and
+more-diffusive heat features at the target readout time while retaining the
+same finite `n_tar` interface for direct, affine-ridge, and random-feature
+readouts. The checked-in heat dataset is bound to a heat-specific validated
+reference. Observation-noise and stability perturbations are not part of this
+analytic calibration question and are not emitted by this study.
+
+For real-Fourier coefficient mode `m`, the stored target and surrogate heat
+multipliers use the physical wavenumber `2*pi*m/L`. On a mode that remains
+identifiable at the equispaced observation interface and whose surrogate
+multiplier is above the configured numerical floor, the ideal linear readout
+multiplier is evaluated in log space as
+
+```text
+exp[-(nu_target*T_target - nu_surrogate*T_surrogate)*(2*pi*m/L)^2].
+```
+
+The coefficient convention is explicitly `DC, cos(1), sin(1), ...`. For even
+`J`, the observation-grid Nyquist cosine is not treated as an identifiable
+sine/cosine pair, and the corresponding sine column is zero on that grid.
+Modes above the paired observable band are marked aliased rather than adding
+a `q <= J` constraint. A surrogate multiplier at or below the configured
+floor, and an unrepresentable ideal ratio, produce explicit status fields and
+empty ratio/error cells rather than forced division.
+
+The coefficient table records physical conditions, both heat multipliers,
+the ideal multiplier, effective linear diagonal, diagonal errors,
+off-diagonal contribution, identification status, and amplification. The
+case/readout summary records identifiable mode/coefficient counts, diagonal
+RMSE and maximum error, off-diagonal Frobenius norm, maximum ideal
+amplification, and selected ridge parameter. Direct and affine readouts have
+well-defined effective linear maps. A nonlinear random-feature readout is
+stored as explicitly not applicable; it is not assigned a fictitious single
+linear multiplier.
+
+More-diffusive features have
+`nu_surrogate*T_surrogate > nu_target*T_target`, so their ideal inverse toward
+a less-diffusive target amplifies high frequencies. This condition and its
+plain-language interpretation are stored in every applicable coefficient row
+and summary row. The comparison reporter reads only verified completed-run
+tables. It cannot initiate dataset construction, feature solves, or study
+execution.
+
+## Surrogate-parameter/readout-time landscape
+
+`surrogate_parameter_time_coordinate_search` and
+`surrogate_parameter_time_landscape` answer different questions through the
+same unified study executor. The coordinate study alternates the two axes as
+an efficient validation-search aid. It is not a two-dimensional phase map.
+The landscape study uses the convergence-validated Burgers target dataset and
+evaluates the complete, predeclared Cartesian product of surrogate diffusion
+parameter and readout time independently for heat, Burgers, and
+reaction-diffusion feature generators.
+
+Heat feature evolution is spectral exact. Burgers and reaction-diffusion
+feature specifications retain the complete checked solver condition used by
+the corresponding validated numerical setup. Parameters that are not swept,
+including Burgers advection/dealias settings and reaction-diffusion
+`alpha`, `beta`, solver, time step, and nonlinear filter, remain explicit in
+the resolved trial and every validation row. This reuse of a checked numerical
+condition does not turn a Burgers-target study into a separate validation
+certificate for every surrogate parameter value.
+
+Every grid cell is an experimental condition declared before validation or
+test access. Cartesian axes require unique values and paths. Config order is
+the tie order. The selection artifact records the planned cell count, complete
+ordered evaluated-candidate list, per-cell axis values and status, and any
+skipped/invalid cell with an explicit reason. Coordinate stages carry
+`search_kind=coordinate` and cannot be consumed by the generic phase-map
+reporter. Duplicate cells are rejected rather than averaged.
+
+Each readout retains its own validation optimum. Separately, the candidate
+selected for `selection.representative_readout` is stored as the
+representative feature condition for downstream studies. That record contains
+the finite-input specification, full feature condition, output interface,
+selection metric/value, and config-order candidate ID. It is copied into the
+frozen evaluation plan and checked against the frozen trial after exact
+write/hash/read-back, all before requesting any test feature state. Test
+metrics do not participate in either selection.
+
+`metric_map` is the publication-independent two-dimensional reporter for the
+parameter landscape and the existing `J x q` and `n_tar x n_sur` studies. Its
+axes are explicitly declared, numerically ordered, and may contain missing
+cells represented as missing values. A validation-selected cell can be
+marked. The reporter is validation-only and operates solely on a verified
+completed result when invoked through plots-only mode. Observation noise and
+stability perturbations remain a Phase 6 responsibility and are absent from
+both Phase 3 parameter/time studies.
+
+## Observation/output budget
+
+`observation_output_budget` evaluates the complete declared Cartesian product
+of observation count `J` and odd real-Fourier output dimension `q`, while
+holding the dataset, split, finite-input `n_tar`, surrogate resolution
+`n_sur`, readout candidate sets, and all non-imported feature conditions
+fixed. It is distinct from `input_simulation_resolution`; changing either
+budget axis must not alter `n_tar` or `n_sur`.
+
+The checked-in smoke and main profiles intentionally contain only the current
+Burgers and reaction-diffusion feature variants. Each imports its complete
+feature system and evolution time from the matching validation-selected
+representative condition in the verified
+`surrogate_parameter_time_landscape` profile. Adding heat or another variant
+is a separate declared expansion of computational scope, not an implicit
+default.
+
+Every valid cell evaluates `direct_fourier_decoder`, `affine_ridge`, and
+`random_feature_ridge`. The primary maps use
+`validation_field_relative_l2_mean` and are generated separately for every
+variant/readout pair. A predeclared cell's test result is a budget-axis
+evaluation only; it is not used to select a budget cell, feature system,
+ridge parameter, or random-feature setting. Readout hyperparameters remain
+selected using train/validation data within that cell before the common
+freeze/read-back boundary.
+
+Cells with `q > J` are valid. The direct decoder records its observable
+bandwidth, retained prefix, and exact zero-filled coefficient/mode counts.
+That structural limitation is not applied to either learned readout. Invalid
+cells and unevaluated missing cells remain distinct in map data: invalid
+cells carry their recorded reason, while a missing cell states that no
+verified validation row exists. A non-finite metric is rejected and is never
+eligible as a best value.
+
+Every validation and test result row records `J`, `q`, `n_tar`, `n_sur`, the
+feature-system condition and hash, completed-selection source hashes, readout
+kind, selected learned-readout settings, reference- and data-space
+representation floors, and its split-specific metrics. Direct rows alone
+carry the fixed-decoder bandwidth fields. Random-feature primary test rows
+remain independent-seed summaries with Student-t intervals; prediction
+ensembles remain separately labeled rows and tables. The completed summary
+separately records declared global-axis combinations, planned
+variant-by-combination cases, evaluated cases, and skipped cases.
+
+## Input/simulation resolution
+
+`input_simulation_resolution` evaluates the complete declared Cartesian
+product of finite-input resolution `n_tar` and surrogate simulation resolution
+`n_sur`, while holding observation count `J`, odd output dimension `q`, the
+dataset, split, readout candidate sets, and all non-imported feature conditions
+fixed. It has its own JSON, scientific identity, result tables, and completed
+run; it is not an alias or execution mode of `observation_output_budget`.
+
+Every cell follows the same finite-information path: the validated `n_ref`
+reference input is spectrally restricted to that cell's `n_tar`, and only
+that finite field is encoded at the cell's `n_sur` before surrogate evolution,
+fixed-`J` observation, and fixed-`q` output. Increasing `n_sur` therefore
+cannot restore a reference mode discarded at `n_tar`. No ordering constraint
+is imposed between `n_tar` and `n_sur`; valid cells require only
+`q <= n_tar` and `J <= n_sur`.
+
+The checked-in smoke and main profiles contain exactly the current Burgers and
+reaction-diffusion variants. Both import the complete system and evolution
+time from the matching validation-selected representative condition in the
+verified Phase 3 landscape. Every cell evaluates the direct, affine, and
+random-feature readouts. The six primary maps are validation maps, one for
+each variant/readout pair. Per-cell test values evaluate predeclared
+resolution axes only and do not select a resolution, system, ridge, or
+random-feature setting.
+
+The smoke grid is `n_tar in {9, 16}` by `n_sur in {9, 16}`, with fixed
+`J=8` and `q=9`. It exercises odd and even resolutions and all three
+relationships `n_tar < n_sur`, `n_tar = n_sur`, and `n_tar > n_sur`. The main
+candidate is the explicit `4 x 4` grid
+`{64, 128, 256, 512} x {64, 128, 256, 512}` with fixed `J=64`, `q=33`,
+two variants, and three readouts: 32 variant-expanded cells and 96 readout
+evaluations before inner hyperparameter/seed work. This describes configured
+cost only; no main resolution result has been executed or verified here.
+
+Each result row stores both reference-field metrics and `n_tar` data-field
+metrics, with their representation floors kept separate, as well as all five
+dimensions, feature-system/source hashes, readout kind, and selected readout
+settings. Feature-state cache identity includes the dataset artifact, ordered
+sample IDs, `n_tar`, `n_sur`, and the complete selected feature dynamics.
+Invalid skipped cells retain a reason; unevaluated map cells remain missing.
+A non-finite numerical result aborts publication and is not converted to
+either a missing cell or a best value.
+
+## Completed-study selection binding
+
+A downstream study may bind a variant's feature evolution to a representative
+condition selected by a verified completed study. The declaration names a
+source study specification, source variant, representative readout, and a
+nonempty allowlisted set of semantic imports. The current allowlist is exactly
+`feature.evolution.system` and `feature.evolution.time`; it cannot overwrite
+finite-input, feature-resolution, observation, output, readout, dataset, or
+split specifications. An imported path cannot also be a downstream search or
+global-sweep axis.
+
+Resolution is read-only. It computes the expected content-addressed source run
+from the source scientific specification and its existing verified dataset,
+requires that exact completed run, and calls the completed-run verifier. It
+then cross-checks the source selection record, frozen evaluation plan, frozen
+model archive, representative case/readout/candidate, validation metric, and
+frozen trial. The selected condition must be explicitly validation-selected,
+must carry no test binding, and is extracted only from those frozen selection
+artifacts. Source test tables and test metrics are not inputs to condition
+resolution.
+
+The downstream scientific identity and resolved study contain no source
+storage path. They contain the source run hash, source study scientific
+identity hash, selection-record hash, frozen-plan hash, frozen-model archive
+hash, source dataset/split identities, case/variant/readout/candidate IDs,
+import paths and resolved values, and the selection metric/value. The same
+provenance is cross-bound into the downstream selection record, frozen plan,
+and frozen model archive before downstream test access.
+
+Source and downstream profiles and dataset/split identities must agree.
+Self-dependencies, dependency cycles, missing or tampered source runs,
+unresolved legacy schemas, and source/downstream profile or data mismatches
+are rejected before downstream feature or test work. A pure plan reports a
+missing dependency without manufacturing a selected value. The read-only
+`pol selection inspect` and `pol selection verify` commands inspect source
+selections and downstream bindings without starting validation, dataset
+construction, or study execution.
 
 ## Execution and reporting
 

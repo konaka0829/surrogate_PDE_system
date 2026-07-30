@@ -124,6 +124,12 @@ def check_convergence(
         )
         rows.append(
             {
+                "convergence_kind": (
+                    "static_encoding_consistency"
+                    if trial.feature.kind == "static_input"
+                    else "surrogate_resolution"
+                ),
+                "pde_convergence_claimed": trial.feature.kind != "static_input",
                 "coarse_n_sur": valid_n_sur[index],
                 "fine_n_sur": valid_n_sur[index + 1],
                 "terminal_relative_l2_mean": terminal["relative_l2_mean"],

@@ -1,4 +1,4 @@
-# Known scientific risks through Phase 2-05B
+# Known scientific risks through the optional digital baseline
 
 Status terms in this document have strict meanings:
 
@@ -27,14 +27,17 @@ per-seed predictions and requires an explicit call to form a prediction
 ensemble. For `random_feature_ridge`, `TrialEngine.evaluate_test` computes
 metrics independently for every frozen evaluation seed. `test_metrics.csv`
 stores their arithmetic mean, Bessel-corrected sample standard deviation, and
-two-sided 95% Student-t interval as the primary result.
+two-sided 95% Student-t interval as the primary result. It additionally stores
+median and quartiles as explicitly descriptive, non-interval summaries.
 
 Per-seed realizations remain in `random_feature_seed_metrics.csv`. The metric
 of the seed-prediction average is now labeled `prediction_ensemble`, uses
 `test_ensemble_*` metric names, and is stored only in
-`random_feature_ensemble_metrics.csv`. Completed-run verification recomputes
-the primary seed summaries and checks frozen seed membership and ensemble row
-cardinality.
+`random_feature_ensemble_metrics.csv`. Per-seed map/member hashes and ensemble
+seed/member hashes bind the rows to the exact frozen realizations; stability
+rows use the same map hash to link norms and conditioning. Completed-run
+verification recomputes the primary seed summaries and checks frozen seed
+membership, hashes, and ensemble row cardinality.
 
 **Residual caveat:** a finite seed count estimates variability only over the
 configured random-feature initialization distribution. Student-t intervals
@@ -42,6 +45,14 @@ describe uncertainty in the arithmetic mean under the usual independent-seed
 assumption; they do not quantify dataset-sampling uncertainty. Ensemble rows
 remain scientifically different models and must not be substituted for the
 primary rows.
+
+Representative-field reporting now uses only test sample IDs, readout IDs,
+random-feature member seeds, and ensemble inclusion declared before the
+selection record and evaluation plan are frozen. The captured examples are
+therefore not chosen after inspecting test predictions. The example set is
+still necessarily small and illustrative; separately stored all-test Fourier
+error aggregates, rather than those examples, support distribution-wide
+spectral claims.
 
 ## R2. GRF frequencies do not use `domain_length`
 
@@ -410,12 +421,181 @@ The production metric formula and study metric field names are unchanged.
 Only invalid input handling was tightened for empty spatial axes,
 non-floating values, and invalid domain lengths. Validation identity and
 certificate are `v12`, the foundation contract is `v8`, the field-quadrature
-check is `pol-field-quadrature-check-v1`, and the package version is `0.2.13`.
+check is `pol-field-quadrature-check-v1`. That contract was recorded by
+package version `0.2.13`; `0.2.14` separates the analytic
+heat-diagnostic/run-table contract, `0.2.15` separates the Cartesian landscape
+and representative-selection contract, and the current `0.2.16` separates
+completed-source-bound downstream identities.
 
 **Residual caveat:** the fixed synthetic suite certifies the mathematical
 quadrature convention and its stated mode band. It is not a substitute for
 running target-specific main profiles or for demonstrating convergence of
 arbitrary unresolved production targets.
+
+## R9. Coordinate search could be mistaken for a complete parameter landscape
+
+**Status: resolved at the study/artifact-contract and smoke levels in Phase
+3-02; main numerical results are not yet verified.**
+
+Earlier behavior:
+
+The single `surrogate_parameter_time` family alternated the surrogate
+diffusion and readout-time axes. Its validation rows were useful for efficient
+coordinate search but did not form the full Cartesian product. It omitted a
+heat feature condition for the Burgers target, and Phase 6 observation-noise
+diagnostics were mixed into the parameter-selection study. The generic
+resolution-map reporter also averaged duplicate `(x,y)` rows, which could
+silently mix feature-system variants.
+
+Phase 3-02 resolution:
+
+- the coordinate helper is renamed
+  `surrogate_parameter_time_coordinate_search`, with no execution alias under
+  the former name;
+- `surrogate_parameter_time_landscape` declares heat, Burgers, and
+  reaction-diffusion variants, each with an explicit `nu x time` grid and all
+  direct, affine, and random-feature readouts;
+- selection/frozen artifacts bind the planned cell count, config-order
+  candidates, evaluated/skipped status and reasons, each readout optimum, and
+  the validation-only representative feature condition before test access;
+- validation rows carry the candidate ID, search kind/cell index, feature
+  system, swept coordinates, and complete fixed solver/PDE parameters;
+- `metric_map` replaces the old reporter kind, preserves declared missing
+  cells, sorts numeric axes, marks a validation-selected cell, and rejects
+  coordinate rows and duplicate cells rather than averaging them;
+- noise diagnostics are absent from both Phase 3 parameter/time studies.
+
+**Residual caveat:** the smoke landscape and focused tiny protocol tests have
+been executed. The 75-cell main landscape was strict-loaded and planned only;
+no production-resolution parameter optimum, phase-map value, or downstream
+representative condition is claimed.
+
+## R10. Downstream feature conditions could be manually detached from validation selection
+
+**Status: resolved at the schema, provenance, focused-test, and smoke-workflow
+levels in Phase 3-03; main numerical bindings have not been executed.**
+
+The observation/output budget now binds both its Burgers and
+reaction-diffusion variants, while the finite/surrogate-resolution study binds
+its Burgers variant, through strict completed-study selection sources.
+Resolution requires the exact content-addressed parameter/time landscape run,
+verifies its completed-run bytes and selection/frozen artifacts, imports only
+the feature system and evolution time, and binds the source hashes, selected
+IDs, validation metric, and resolved values into downstream identity, freeze
+artifacts, and result rows. Source and downstream profile, dataset, and split
+must agree. Missing dependencies remain explicitly missing in pure plans;
+tamper, unauthorized imports, self/cycles, and smoke-to-main binding are
+rejected before downstream feature/test work.
+
+Focused tiny tests cover path-independent identity, source-content sensitivity,
+manual-placeholder replacement, test-metric non-use, ordering, and all named
+failure modes. The smoke workflow orders the landscape before the two
+downstream studies and performs read-only selection inspection/verification.
+
+**Residual caveat:** no main landscape or main downstream study was executed.
+The main JSON files express a provenance-safe plan, not a selected production
+condition or reported downstream result.
+
+## R11. Observation/output cells could conflate information budgets
+
+**Status: resolved at the configuration, row-contract, focused-test, and
+smoke-workflow levels in Phase 4-01; main numerical results are unverified.**
+
+`observation_output_budget` declares only `feature.observation.J` and
+`output.q` as its rectangular global axes. `n_tar` and `n_sur` remain fixed,
+and every Burgers/reaction-diffusion cell uses the same matching Phase 3
+selected feature system/time source. Direct, affine, and random-feature
+readouts are all present. Learned cells with `q > J` remain valid; only the
+direct decoder reports observable, retained, and zero-filled bandwidth.
+
+Result rows explicitly bind the four study dimensions, feature-system hash,
+completed-source hashes, selected ridge/random-feature settings,
+split-specific metrics, and both representation floors. The primary maps are
+validation-only. Predeclared test rows evaluate budget-axis cells and do not
+select them. Map construction distinguishes reason-bearing invalid cells from
+cells with no verified row and rejects non-finite metrics.
+
+**Residual caveat:** the smoke grid is deliberately small and the checked-in
+main rectangular grid has only been strict-loaded and planned. No production
+budget optimum or main map value is claimed.
+
+## R12. Publication summaries could silently mix runs, splits, or Model 3 semantics
+
+**Status: resolved at the report-contract, exact-byte, and focused-test
+levels; main report results are unverified.**
+
+Cross-run phase diagrams and baseline tables now use a separate strict
+`pol-report-v1` command. It resolves two or more study specifications to exact
+verified completed runs before rendering, fixes split/metric/variant/readout
+coordinates in advance, and binds source run, scientific identity, manifest,
+selection, and frozen-plan hashes into a storage-path-independent report
+identity. Validation and test maps remain separate. Cell tables distinguish
+missing and reason-bearing invalid coordinates and reject NaN/Inf.
+
+The baseline machine table keeps reference-field and finite-data errors and
+their representation floors in separate columns. Random-feature rows require
+the independent-seed primary summary and preserve mean, Bessel-corrected
+standard deviation, and Student-t interval; prediction ensembles cannot enter
+primary columns. Transactional failure tests show that a failed renderer does
+not replace a prior verified report or mutate a source.
+
+**Residual caveat:** only tiny/focused and smoke-scale report sources are
+executed during maintenance. The checked-in main report is a declaration and
+does not establish production phase diagrams or a production baseline table.
+
+## R13. A blind all-in-one command could obscure production dependencies and recovery
+
+**Status: resolved operationally; production execution remains pending.**
+
+The former `run_main.sh` chained expensive validation, dataset, and study
+commands after a timed warning and omitted several mandatory later studies.
+It has been replaced by explicit one-stage invocations guarded by
+`POL_CONFIRM_MAIN=YES`; no all stage exists. The read-only
+`pol-production-plan-audit-v2` script strict-parses and pure-plans all current
+main validations, datasets, studies, the digital baseline, and the cross-run
+report, including case/candidate/model/seed counts and missing dependency
+state. The production
+runbook defines the landscape selection checkpoint, verification, reuse,
+interruption, backup, plots-only, report, and failure-recovery procedures.
+
+**Residual caveat:** the procedures and counts are validated by parsing,
+focused tests, and smoke execution. They are not evidence of main runtime,
+capacity, numerical outcomes, or successful production recovery on a
+different host.
+
+## R14. A digital neural operator could be compared through an unfair or leaky path
+
+**Status: resolved at the adapter-contract, focused-test, and smoke levels;
+main training and performance remain unverified.**
+
+FNO1d is implemented as an independent `pol.digital_baselines` adapter rather
+than a physical-feature readout. It consumes only the finite `n_tar` input and
+shares the exact validated dataset, canonical split, `q` interface, and
+reference/data metric implementation with a verified physical baseline source.
+The physical `StudyRunner` does not import the adapter.
+
+Architecture candidates and epoch checkpoints use training/validation only.
+Selection and evaluation training seeds are disjoint. The selection record,
+evaluation-seed checkpoint archive, and frozen plan are written, byte/tensor
+hashed, and read back before the finite test view is requested. Primary test
+results aggregate independently trained evaluation-seed metrics with
+Bessel-corrected standard deviation and a Student-t 95% interval; prediction
+averaging is a separately labeled ensemble.
+
+The predeclared fairness table binds dataset/split hashes, input/output
+dimensions, parameter counts, validation selection values, separate
+reference/data errors and floors, seed statistics, source/condition hashes,
+and distinct physical/digital inference paths. Digital training timing is
+recorded, but energy is unmeasured and physical/digital timing or energy
+comparison is explicitly prohibited without a common measurement protocol.
+Missing/tampered physical sources and checkpoint tampering fail verification;
+focused tests assert the failure/test-access order.
+
+**Residual caveat:** smoke uses an intentionally tiny network and two epochs
+and supports no performance conclusion. The checked-in main CPU budget
+(two candidates, five selection seeds, ten evaluation seeds, 100 epochs/model,
+64,000 optimizer steps at most) is strict-planned only. No main FNO result,
+hardware-normalized timing, energy measurement, or DeepONet result exists.
 
 ## Items not yet verified
 
@@ -432,4 +612,7 @@ arbitrary unresolved production targets.
   The reaction-diffusion main profile was also parse/static validated only.
   Main-scale cross-solver behavior and target-specific production
   reference-grid convergence remain unestablished.
+- The main surrogate parameter/time landscape has not been executed. Its
+  checked-in candidate set and solver conditions are a research plan, not a
+  reported numerical result.
 - This work does not establish cross-device numerical equivalence.

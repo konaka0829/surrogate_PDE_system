@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import itertools
+import math
 from typing import Any, Mapping
 
 import torch
@@ -145,10 +146,15 @@ def _fit_affine(
         candidates.append(
             (float(zeta), prefix_metrics(metrics, "validation"), fitted)
         )
-    best = min(
+    metric_values = [
         float(metrics[inputs.selection_metric])
         for _, metrics, _ in candidates
-    )
+    ]
+    if not all(math.isfinite(value) for value in metric_values):
+        raise ValueError(
+            "affine readout produced a non-finite validation selection metric"
+        )
+    best = min(metric_values)
     eligible = [
         item
         for item in candidates
@@ -197,12 +203,23 @@ def _random_feature_members(
             float(chosen["zeta"]),
             svd_rcond=readout.svd_rcond,
         )
+        validation_prediction = fitted(random_map(inputs.x_validation))
+        validation_metrics = evaluate_coefficients(
+            validation_prediction,
+            inputs.y_validation,
+            inputs.data_target_validation,
+            inputs.reference_target_validation,
+            n_tar=inputs.n_tar,
+            n_ref=inputs.n_ref,
+            domain_length=inputs.domain_length,
+        )
         members.append(
             {
                 **serialize_affine(fitted, zeta=float(chosen["zeta"])),
                 "seed": int(seed),
                 "A": random_map.A.detach().cpu(),
                 "c": random_map.c.detach().cpu(),
+                "evaluation_seed_validation_metrics": validation_metrics,
             }
         )
     return members
@@ -264,10 +281,16 @@ def _fit_random_feature(
                 "selection_seed_metrics": seed_metrics,
             }
         )
-    best = min(
+    metric_values = [
         float(item["metrics"][inputs.selection_metric])
         for item in structural
-    )
+    ]
+    if not all(math.isfinite(value) for value in metric_values):
+        raise ValueError(
+            "random-feature readout produced a non-finite validation "
+            "selection metric"
+        )
+    best = min(metric_values)
     chosen = next(
         item
         for item in structural

@@ -253,17 +253,17 @@ def test_trial_readout_validation_freeze_and_test_characterization() -> None:
     }
     assert snapshot == {
         "candidate_id": (
-            "809715dc4e19479b6756069d03be578603057200e00ebc3b4c03749e6166b5f1"
+            "094500d2b98f97fe9e3995ec2a134924f29db6c611a6244b51aa86831eefbd97"
         ),
         "validation_rows": {
-            "direct": (
-                "5a0dc84a27b858f9fd9b294f85e73d5ebd01de9b4c44da1e5b716b4c30fa0c6d"
-            ),
-            "affine": (
-                "c5f4f6a1c4df0ad87f5fa726bba1a57aa722673f15c9f659f2553ca26f405a53"
-            ),
-            "random": (
-                "d51aea089443026512e03b5796861ada0d65273cf2c76a0f039f7cb90210971d"
+                "direct": (
+                            "50ff54b2eb1ebec482dc50f30686678621bd8dd5464862e42011cf8b680fc9e1"
+                ),
+                "affine": (
+                            "9e365d313682a1fbd982d6040b6f1c1ca11adc4e8ab536d8ba1776a3c1c44e41"
+                ),
+                "random": (
+                            "83832f72cbe8e7da86c87eaa5fb70663b101547b6f36570b420a0a2ed5f8eddd"
             ),
         },
         "inner_selections": {
@@ -284,19 +284,19 @@ def test_trial_readout_validation_freeze_and_test_characterization() -> None:
             "affine": (
                 "c9db7e4eb4918d5880f7f2a3f0525424e343bd5c331ab6e605c772647936a7aa"
             ),
-            "random": (
-                "944993ba74e142cbafa263073fd5eec211a49dffbc5550f14efdfc9349ee919b"
+                "random": (
+                    "efdb33787c9b2d6e98d746be119192f5907712c1f8330a89c0b88d85483d2a0c"
             ),
         },
         "test_primary_rows": {
-            "direct": (
-                "97969c0ef21c821e02504e41a0f397365caa5648b38a8611bef1a4bdb1df1784"
-            ),
-            "affine": (
-                "4ef407ed2173b25e50798ceee19df62d64ba23dee4f3133128c6a3ec04eca1d4"
-            ),
-            "random": (
-                "89eb44f2a2450f7a71c9f89fc44d785051374d6395b2ea0841efaab7f60a7cf0"
+                "direct": (
+                            "4c82bbb11ef912478159d56eb17029670c019f6b796933dd0d31dd306ba16619"
+                ),
+                "affine": (
+                            "ea23884d4b0cca68b6c56f86a77c3c60993ce070bfefc07ff4d07271d4ebbe3f"
+                ),
+                    "random": (
+                                "e5f20fb2589bc7889b89799e1451f210a83dc307415fa9101b2bbcc01bf02ae2"
             ),
         },
         "test_seed_rows": {
@@ -306,15 +306,15 @@ def test_trial_readout_validation_freeze_and_test_characterization() -> None:
             "affine": (
                 "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
             ),
-            "random": (
-                "cd11eea281548123cdbeb3e6244e1d7d74c5332fcc5144eb186c249c63226671"
+                    "random": (
+                                "3514d179b58e15b7abbc57e285caf169ee9e0247ac959732ab61f185f8d5ba4c"
             ),
         },
         "test_ensemble_rows": {
             "direct": None,
             "affine": None,
-            "random": (
-                "39ef9ff0c2923f215130fcff01fbc60dff4b212d71773fc502660a56d7fbee5d"
+                    "random": (
+                                "d5875ce9612f60cc399549751969ce9c3cd030ef272f0a32c8349a5901649d1f"
             ),
         },
     }
@@ -473,6 +473,7 @@ def test_test_reporter_reads_random_feature_canonical_seed_mean(
         [reporter],
         validation_rows=[],
         test_rows=[row],
+        multiplier_rows=[],
         noise_rows=[],
         output_dir=tmp_path,
     )

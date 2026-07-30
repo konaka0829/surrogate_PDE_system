@@ -1,13 +1,13 @@
 {
-  "schema_version": "pol-study-v1",
-  "name": "surrogate_parameter_time",
+  "schema_version": "pol-study-v3",
+  "name": "surrogate_parameter_time_coordinate_search",
   "output_root": "outputs/studies",
   "artifact_root": "artifacts",
-  "profile": "main",
-  "dataset_spec": "configs/datasets/burgers_main.json",
+  "profile": "smoke",
+  "dataset_spec": "configs/datasets/burgers_smoke.json",
   "base_trial": {
     "input": {
-      "n_tar": 512,
+      "n_tar": 32,
       "resampling": "spectral"
     },
     "feature": {
@@ -19,21 +19,21 @@
           "advection_coefficient": 1.0,
           "solver": "split_step",
           "dt": 0.01,
-          "fine_dt": 0.001,
+          "fine_dt": 0.005,
           "dealias": true
         },
-        "time": 1.0
+        "time": 0.01
       },
-      "n_sur": 512,
+      "n_sur": 64,
       "observation": {
         "kind": "equispaced_points",
-        "J": 256,
+        "J": 16,
         "l2_scale": true
       }
     },
     "output": {
       "kind": "real_fourier",
-      "q": 257
+      "q": 17
     },
     "readouts": [
       {
@@ -48,12 +48,9 @@
         "zetas": [
           0.0,
           1e-12,
-          1e-10,
-          1e-08,
-          1e-06,
-          0.0001
+          1e-08
         ],
-        "tie_tolerance": 1e-10,
+        "tie_tolerance": 1e-12,
         "tie_break": "largest_zeta",
         "svd_rcond": null
       },
@@ -63,47 +60,27 @@
         "display_name": "Model 3",
         "activation": "tanh",
         "widths": [
-          128,
-          256,
-          512
+          4
         ],
         "weight_scales": [
-          0.25,
-          0.5,
-          1.0
+          0.5
         ],
         "bias_scales": [
-          0.0,
           0.1
         ],
         "selection_seeds": [
-          101,
-          102,
-          103,
-          104,
-          105
+          11,
+          12
         ],
         "evaluation_seeds": [
-          201,
-          202,
-          203,
-          204,
-          205,
-          206,
-          207,
-          208,
-          209,
-          210
+          21,
+          22
         ],
         "zetas": [
           0.0,
-          1e-12,
-          1e-10,
-          1e-08,
-          1e-06,
-          0.0001
+          1e-08
         ],
-        "tie_tolerance": 1e-10,
+        "tie_tolerance": 1e-12,
         "svd_rcond": null
       }
     ]
@@ -119,27 +96,21 @@
           {
             "path": "feature.evolution.system.nu",
             "values": [
-              0.0025,
               0.005,
-              0.01,
-              0.02,
-              0.04
+              0.01
             ],
             "anchor": 0.01
           },
           {
             "path": "feature.evolution.time",
             "values": [
-              0.5,
-              0.75,
-              1.0,
-              1.25,
-              1.5
+              0.01,
+              0.02
             ],
-            "anchor": 1.0
+            "anchor": 0.01
           }
         ],
-        "rounds": 1
+        "rounds": 0
       }
     },
     {
@@ -162,73 +133,51 @@
           {
             "path": "feature.evolution.system.nu",
             "values": [
-              0.0025,
               0.005,
-              0.01,
-              0.02,
-              0.04
+              0.01
             ],
             "anchor": 0.01
           },
           {
             "path": "feature.evolution.time",
             "values": [
-              0.5,
-              0.75,
-              1.0,
-              1.25,
-              1.5
+              0.01,
+              0.02
             ],
-            "anchor": 1.0
+            "anchor": 0.01
           }
         ],
-        "rounds": 1
+        "rounds": 0
       }
     }
   ],
   "selection": {
     "metric": "validation_field_relative_l2_mean",
-    "tie_tolerance": 1e-08,
+    "tie_tolerance": 1e-12,
     "tie_break": "first_in_config_order",
     "representative_readout": "affine",
     "freeze_before_test": true
   },
   "convergence": {
     "sample_ids": [
-      844,
-      1088,
-      1375,
-      50,
-      471
+      16,
+      11
     ],
     "n_sur_candidates": [
-      512,
-      1024,
-      2048
+      64,
+      128
     ],
     "tolerances": {
-      "terminal_mean": 0.01,
-      "terminal_max": 0.02,
-      "feature_mean": 0.01,
-      "feature_max": 0.02,
-      "prediction_mean": 0.02,
-      "prediction_max": 0.04
+      "terminal_mean": 0.5,
+      "terminal_max": 0.7,
+      "feature_mean": 0.5,
+      "feature_max": 0.7,
+      "prediction_mean": 0.5,
+      "prediction_max": 0.7
     },
-    "max_auto_reruns": 1
+    "max_auto_reruns": 0
   },
-  "diagnostics": [
-    {
-      "kind": "noise_robustness",
-      "levels": [
-        0.0,
-        0.0001,
-        0.001,
-        0.01
-      ],
-      "repeats": 10,
-      "seed": 101
-    }
-  ],
+  "diagnostics": [],
   "reporters": [
     {
       "kind": "metric_curve",

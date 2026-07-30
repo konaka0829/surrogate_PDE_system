@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
-
-from pol.math.fourier import real_fourier_synthesis
 
 
 def l2_synthesis_matrix(
@@ -15,9 +14,28 @@ def l2_synthesis_matrix(
     dtype: torch.dtype = torch.float64,
     device: torch.device | str = "cpu",
 ) -> torch.Tensor:
-    eye = torch.eye(q, dtype=dtype, device=device)
-    points = real_fourier_synthesis(eye, J, domain_length=domain_length).T
-    return points * (domain_length / J) ** 0.5
+    """Map real-Fourier coefficients to L2-scaled equispaced observations.
+
+    Unlike field synthesis on a ``J``-node storage grid, this observation
+    matrix deliberately permits ``q > J``.  Such columns are aliased and are
+    characterized as non-identifiable by diagnostics; permitting them here
+    does not introduce a general ``q <= J`` interface constraint.
+    """
+    if q <= 0 or q % 2 == 0:
+        raise ValueError("q must be a positive odd integer")
+    if J < 2:
+        raise ValueError("J must be >= 2")
+    if not math.isfinite(float(domain_length)) or domain_length <= 0:
+        raise ValueError("domain_length must be finite and positive")
+    points = torch.arange(J, dtype=dtype, device=device)
+    matrix = torch.empty((J, q), dtype=dtype, device=device)
+    matrix[:, 0] = 1.0 / math.sqrt(float(J))
+    scale = math.sqrt(2.0 / float(J))
+    for mode in range(1, (q - 1) // 2 + 1):
+        phase = 2.0 * torch.pi * float(mode) * points / float(J)
+        matrix[:, 2 * mode - 1] = scale * torch.cos(phase)
+        matrix[:, 2 * mode] = scale * torch.sin(phase)
+    return matrix
 
 
 @dataclass(frozen=True)

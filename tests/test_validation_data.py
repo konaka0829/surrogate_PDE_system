@@ -230,6 +230,46 @@ def test_foundation_validation_publishes_passing_certificate(tmp_path: Path) -> 
     assert (outcome.reference.path / "master_initial_conditions.pt").is_file()
 
 
+def test_common_foundation_checks_execute_once_for_each_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pol.validation.runner as validation_runner
+
+    original = validation_runner.run_foundation_checks
+    calls: list[str] = []
+
+    def counted(spec, archive):
+        calls.append(spec.target_reference.kind)
+        return original(spec, archive)
+
+    monkeypatch.setattr(
+        validation_runner,
+        "run_foundation_checks",
+        counted,
+    )
+    burgers_path, _, _ = write_tiny_stack(tmp_path / "burgers")
+    heat_path, _, _ = write_tiny_heat_stack(tmp_path / "heat")
+    specs = (
+        load_validation_spec(
+            burgers_path,
+            repo_root=tmp_path / "burgers",
+        ),
+        load_validation_spec(
+            heat_path,
+            repo_root=tmp_path / "heat",
+        ),
+        _tiny_reaction_diffusion_spec(tmp_path / "reaction_diffusion"),
+    )
+    for spec in specs:
+        ensure_validation(spec)
+    assert calls == [
+        "burgers_convergence",
+        "heat_analytic",
+        "reaction_diffusion_convergence",
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -525,7 +565,7 @@ def test_reaction_diffusion_nonfinite_solve_publishes_verified_failure_artifact(
         return torch.full_like(values, torch.inf), {}
 
     monkeypatch.setattr(
-        "pol.validation.runner.evolve",
+        "pol.validation.reference_convergence.evolve",
         nonfinite_evolve,
     )
     with pytest.raises(RuntimeError, match="non-finite state"):
@@ -697,7 +737,7 @@ def test_disabled_cross_solver_validation_performs_no_cross_solve(
         raise AssertionError("disabled cross-solver diagnostic was executed")
 
     monkeypatch.setattr(
-        "pol.validation.runner._burgers_cross_solver_validation",
+        "pol.validation.burgers_reference._burgers_cross_solver_validation",
         forbidden,
     )
     outcome = ensure_validation(spec)
@@ -729,7 +769,7 @@ def test_cross_solver_comparison_waits_for_both_self_convergence_checks(
         )
 
     monkeypatch.setattr(
-        "pol.validation.runner.symmetric_field_discrepancy",
+        "pol.validation.burgers_reference.symmetric_field_discrepancy",
         forbidden,
     )
     with pytest.raises(RuntimeError, match="cross_solver_validation.*fail"):
@@ -964,7 +1004,10 @@ def test_calibration_test_overlap_fails_before_compute_or_publication(
         "pol.validation.runner.generate_grf_archive",
         forbidden,
     )
-    monkeypatch.setattr("pol.validation.runner.evolve", forbidden)
+    monkeypatch.setattr(
+        "pol.validation.reference_convergence.evolve",
+        forbidden,
+    )
     monkeypatch.setattr(
         "pol.validation.runner.ArtifactStore.publish",
         forbidden,
