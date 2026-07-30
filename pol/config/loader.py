@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from .json_values import NonFiniteJsonConstantError, strict_json_loads
 from .models import DatasetSpec, StudySpec, ValidationSpec
 from .report_models import ReportSpec
 from pol.digital_baselines.protocol import DigitalBaselineSpec
@@ -26,7 +27,9 @@ def _format_validation_error(exc: ValidationError) -> ValueError:
 def _read(path: str | Path) -> dict[str, Any]:
     source = Path(path).resolve()
     try:
-        raw = json.loads(source.read_text(encoding="utf-8"))
+        raw = strict_json_loads(source.read_text(encoding="utf-8"))
+    except NonFiniteJsonConstantError as exc:
+        raise ValueError(f"invalid JSON in {source}: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON in {source}: {exc}") from exc
     if not isinstance(raw, dict):
@@ -192,7 +195,7 @@ def load_study_with_overrides(
             raise ValueError("--set must use dotted.path=JSON_VALUE")
         dotted, encoded = item.split("=", 1)
         try:
-            value = json.loads(encoded)
+            value = strict_json_loads(encoded)
         except json.JSONDecodeError:
             value = encoded
         _set_path(raw, dotted, value)

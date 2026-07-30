@@ -131,7 +131,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     digital.add_argument(
         "target",
-        help="path to a pol-digital-baseline-v1 spec, or the literal 'verify'",
+        help="path to a pol-digital-baseline-v3 spec, or the literal 'verify'",
     )
     digital.add_argument(
         "path",
@@ -229,13 +229,15 @@ def main(argv: list[str] | None = None) -> int:
                 "pol-study-run-manifest-v12",
                 "pol-study-run-manifest-v13",
                 "pol-study-run-manifest-v14",
+                "pol-study-run-manifest-v15",
+                "pol-study-run-manifest-v16",
             }:
                 manifest = verify_study_run(path)
                 kind = "study_run"
             elif schema == "pol-report-manifest-v1":
                 manifest = verify_report(path)
                 kind = "report"
-            elif schema == "pol-digital-baseline-run-manifest-v1":
+            elif schema == "pol-digital-baseline-run-manifest-v4":
                 manifest = verify_digital_baseline_run(path)
                 kind = "digital_baseline_run"
             else:

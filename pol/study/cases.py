@@ -4,7 +4,11 @@ from dataclasses import dataclass
 import itertools
 from typing import Any, Mapping
 
-from pol.config.models import StudySpec, TrialSpec
+from pol.config.models import (
+    ReadoutStabilityNoiseDiagnosticSpec,
+    StudySpec,
+    TrialSpec,
+)
 from pol.runtime.device import execution_device_policy
 from pol.runtime.environment import numerical_environment_fingerprint
 from .overrides import apply_trial_overrides
@@ -54,7 +58,7 @@ def build_study_run_identity(
     selection_source_provenance: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     return {
-        "schema_version": "pol-study-run-identity-v13",
+        "schema_version": "pol-study-run-identity-v15",
         **execution_device_policy(),
         "environment": numerical_environment_fingerprint(),
         "study": scientific_study_spec(
@@ -157,26 +161,369 @@ def preflight_grid_searches(
                 ) from exc
 
 
-def plan_study(spec: StudySpec) -> dict[str, Any]:
+def _candidate_upper_bound(case: StudyCase) -> int:
+    search = case.search
+    if search.kind == "static":
+        return 1
+    if search.kind == "grid":
+        count = 1
+        for axis in search.axes:
+            count *= len(axis.values)
+        return count
+    return (
+        sum(len(axis.values) for axis in search.axes)
+        * (search.rounds + 1)
+        * len(case.trial.readouts)
+    )
+
+
+def _case_workload(
+    case: StudyCase,
+    *,
+    candidate_upper_bound: int,
+    canonical_n_train: int | None,
+) -> dict[str, Any]:
+    trial = case.trial
+    affine_zeta_fits = 0
+    affine_zero_zeta_svds = 0
+    random_map_count = 0
+    random_lift_count = 0
+    random_selection_ridge_fits = 0
+    random_selection_zero_svds = 0
+    random_selected_evaluation_fits = 0
+    random_selected_evaluation_zero_svds = 0
+    random_eager_evaluation_fits = 0
+    maximum_lifted_dimension: int | None = None
+    random_readout_count = 0
+    for readout in trial.readouts:
+        if readout.kind == "affine_ridge":
+            affine_zeta_fits += (
+                candidate_upper_bound * len(readout.zetas)
+            )
+            affine_zero_zeta_svds += candidate_upper_bound * sum(
+                float(zeta) == 0.0 for zeta in readout.zetas
+            )
+        elif readout.kind == "random_feature_ridge":
+            random_readout_count += 1
+            structure_count = (
+                len(readout.widths)
+                * len(readout.weight_scales)
+                * len(readout.bias_scales)
+            )
+            map_count = (
+                candidate_upper_bound
+                * structure_count
+                * len(readout.selection_seeds)
+            )
+            selection_fit_count = map_count * len(readout.zetas)
+            selected_evaluation_count = len(readout.evaluation_seeds)
+            eager_evaluation_count = (
+                candidate_upper_bound * selected_evaluation_count
+            )
+            random_map_count += map_count
+            random_lift_count += 2 * map_count
+            random_selection_ridge_fits += selection_fit_count
+            random_selection_zero_svds += map_count * sum(
+                float(zeta) == 0.0 for zeta in readout.zetas
+            )
+            random_selected_evaluation_fits += selected_evaluation_count
+            random_eager_evaluation_fits += eager_evaluation_count
+            if any(float(zeta) == 0.0 for zeta in readout.zetas):
+                random_selected_evaluation_zero_svds += (
+                    selected_evaluation_count
+                )
+            lifted = int(trial.feature.observation.J) + max(
+                int(width) for width in readout.widths
+            )
+            maximum_lifted_dimension = (
+                lifted
+                if maximum_lifted_dimension is None
+                else max(maximum_lifted_dimension, lifted)
+            )
+    n_train = (
+        int(trial.training_subset.n_train)
+        if trial.training_subset is not None
+        else canonical_n_train
+    )
+    return {
+        "schema_version": "pol-study-workload-case-v1",
+        "case_id": case.case_id,
+        "candidate_trial_upper_bound": candidate_upper_bound,
+        "feature_state_solve_upper_bound": candidate_upper_bound,
+        "configured_readout_count": len(trial.readouts),
+        "candidate_readout_evaluation_upper_bound": (
+            candidate_upper_bound * len(trial.readouts)
+        ),
+        "affine": {
+            "zeta_fit_count": affine_zeta_fits,
+            "zero_zeta_svd_count": affine_zero_zeta_svds,
+        },
+        "random_feature": {
+            "configured_readout_count": random_readout_count,
+            "unique_random_map_count": random_map_count,
+            "train_validation_lift_count": random_lift_count,
+            "selection_seed_ridge_fit_count": (
+                random_selection_ridge_fits
+            ),
+            "ridge_fit_count": random_selection_ridge_fits,
+            "selected_candidate_evaluation_member_fit_count": (
+                random_selected_evaluation_fits
+            ),
+            "eager_legacy_evaluation_member_fit_count": (
+                random_eager_evaluation_fits
+            ),
+            "lazy_total_ridge_fit_count": (
+                random_selection_ridge_fits
+                + random_selected_evaluation_fits
+            ),
+            "eager_legacy_total_ridge_fit_count": (
+                random_selection_ridge_fits
+                + random_eager_evaluation_fits
+            ),
+            "selection_zero_zeta_svd_count": (
+                random_selection_zero_svds
+            ),
+            "selected_evaluation_zero_zeta_svd_upper_bound": (
+                random_selected_evaluation_zero_svds
+            ),
+            "zero_zeta_svd_upper_bound": (
+                random_selection_zero_svds
+                + random_selected_evaluation_zero_svds
+            ),
+            "maximum_lifted_dimension": maximum_lifted_dimension,
+            "maximum_target_dimension": int(trial.output.q),
+            "maximum_training_sample_count": n_train,
+        },
+        "convergence": {
+            "feature_state_solve_upper_bound": 0,
+            "comparison_row_upper_bound": 0,
+        },
+    }
+
+
+def _sum_nested(
+    workloads: list[dict[str, Any]],
+    section: str,
+    field: str,
+) -> int:
+    return sum(int(item[section][field]) for item in workloads)
+
+
+def _study_workload(
+    spec: StudySpec,
+    *,
+    cases: list[StudyCase],
+    candidate_upper_bounds: list[int],
+    canonical_n_train: int | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    per_case = [
+        _case_workload(
+            case,
+            candidate_upper_bound=candidate_upper_bound,
+            canonical_n_train=canonical_n_train,
+        )
+        for case, candidate_upper_bound in zip(
+            cases,
+            candidate_upper_bounds,
+            strict=True,
+        )
+    ]
+    convergence_solves = 0
+    convergence_rows = 0
+    if spec.convergence is not None:
+        base_count = len(spec.convergence.n_sur_candidates)
+        attempts = int(spec.convergence.max_auto_reruns) + 1
+        per_case_solves = sum(base_count + rerun for rerun in range(attempts))
+        per_case_rows = sum(
+            base_count + rerun - 1 for rerun in range(attempts)
+        )
+        convergence_solves = len(cases) * per_case_solves
+        convergence_rows = len(cases) * per_case_rows
+        for workload in per_case:
+            workload["convergence"] = {
+                "feature_state_solve_upper_bound": per_case_solves,
+                "comparison_row_upper_bound": per_case_rows,
+            }
+    noise_coordinate_count = 0
+    noise_feature_state_solve_count = 0
+    for diagnostic in spec.diagnostics:
+        if isinstance(diagnostic, ReadoutStabilityNoiseDiagnosticSpec):
+            selected_model_count = sum(
+                len(case.trial.readouts) for case in cases
+            )
+            noise_coordinate_count += (
+                selected_model_count
+                * len(diagnostic.levels)
+                * int(diagnostic.repeats)
+            )
+            noise_feature_state_solve_count += selected_model_count
+    maximum_training_counts = [
+        item["random_feature"]["maximum_training_sample_count"]
+        for item in per_case
+        if item["random_feature"]["configured_readout_count"] > 0
+    ]
+    training_count_resolved = all(
+        value is not None for value in maximum_training_counts
+    )
+    workload = {
+        "schema_version": "pol-study-workload-plan-v1",
+        "status": (
+            "resolved"
+            if training_count_resolved
+            else "unresolved_canonical_training_sample_count"
+        ),
+        "count_semantics": "declared_operation_upper_bounds_v1",
+        "case_count": len(cases),
+        "candidate_trial_upper_bound": sum(candidate_upper_bounds),
+        "feature_state_solve_upper_bound": sum(candidate_upper_bounds),
+        "configured_readout_count": sum(
+            len(case.trial.readouts) for case in cases
+        ),
+        "candidate_readout_evaluation_upper_bound": sum(
+            candidate * len(case.trial.readouts)
+            for case, candidate in zip(
+                cases,
+                candidate_upper_bounds,
+                strict=True,
+            )
+        ),
+        "affine": {
+            "zeta_fit_count": _sum_nested(
+                per_case, "affine", "zeta_fit_count"
+            ),
+            "zero_zeta_svd_count": _sum_nested(
+                per_case, "affine", "zero_zeta_svd_count"
+            ),
+        },
+        "random_feature": {
+            "unique_random_map_count": _sum_nested(
+                per_case, "random_feature", "unique_random_map_count"
+            ),
+            "train_validation_lift_count": _sum_nested(
+                per_case,
+                "random_feature",
+                "train_validation_lift_count",
+            ),
+            "selection_seed_ridge_fit_count": _sum_nested(
+                per_case,
+                "random_feature",
+                "selection_seed_ridge_fit_count",
+            ),
+            "ridge_fit_count": _sum_nested(
+                per_case,
+                "random_feature",
+                "ridge_fit_count",
+            ),
+            "selected_candidate_evaluation_member_fit_count": _sum_nested(
+                per_case,
+                "random_feature",
+                "selected_candidate_evaluation_member_fit_count",
+            ),
+            "eager_legacy_evaluation_member_fit_count": _sum_nested(
+                per_case,
+                "random_feature",
+                "eager_legacy_evaluation_member_fit_count",
+            ),
+            "lazy_total_ridge_fit_count": _sum_nested(
+                per_case,
+                "random_feature",
+                "lazy_total_ridge_fit_count",
+            ),
+            "eager_legacy_total_ridge_fit_count": _sum_nested(
+                per_case,
+                "random_feature",
+                "eager_legacy_total_ridge_fit_count",
+            ),
+            "selection_zero_zeta_svd_count": _sum_nested(
+                per_case,
+                "random_feature",
+                "selection_zero_zeta_svd_count",
+            ),
+            "selected_evaluation_zero_zeta_svd_upper_bound": _sum_nested(
+                per_case,
+                "random_feature",
+                "selected_evaluation_zero_zeta_svd_upper_bound",
+            ),
+            "zero_zeta_svd_upper_bound": _sum_nested(
+                per_case,
+                "random_feature",
+                "zero_zeta_svd_upper_bound",
+            ),
+            "maximum_lifted_dimension": max(
+                (
+                    int(value)
+                    for value in (
+                        item["random_feature"][
+                            "maximum_lifted_dimension"
+                        ]
+                        for item in per_case
+                    )
+                    if value is not None
+                ),
+                default=None,
+            ),
+            "maximum_target_dimension": max(
+                (
+                    int(item["random_feature"][
+                        "maximum_target_dimension"
+                    ])
+                    for item in per_case
+                    if item["random_feature"][
+                        "configured_readout_count"
+                    ]
+                    > 0
+                ),
+                default=None,
+            ),
+            "maximum_training_sample_count": (
+                max(int(value) for value in maximum_training_counts)
+                if maximum_training_counts and training_count_resolved
+                else None
+            ),
+        },
+        "convergence": {
+            "feature_state_solve_upper_bound": convergence_solves,
+            "comparison_row_upper_bound": convergence_rows,
+        },
+        "diagnostics": {
+            "noise_coordinate_evaluation_upper_bound": (
+                noise_coordinate_count
+            ),
+            "feature_state_solve_upper_bound": (
+                noise_feature_state_solve_count
+            ),
+        },
+    }
+    return workload, per_case
+
+
+def plan_study(
+    spec: StudySpec,
+    *,
+    canonical_n_train: int | None = None,
+) -> dict[str, Any]:
     cases, skipped = build_cases(spec)
     preflight_grid_searches(
         cases,
         invalid_policy=spec.execution.invalid_trial_policy,
     )
     planned: list[dict[str, Any]] = []
-    for case in cases:
+    candidate_upper_bounds = [
+        _candidate_upper_bound(case) for case in cases
+    ]
+    workload, case_workloads = _study_workload(
+        spec,
+        cases=cases,
+        candidate_upper_bounds=candidate_upper_bounds,
+        canonical_n_train=canonical_n_train,
+    )
+    for case, candidate_upper_bound, case_workload in zip(
+        cases,
+        candidate_upper_bounds,
+        case_workloads,
+        strict=True,
+    ):
         search = case.search
-        if search.kind == "static":
-            candidate_upper_bound = 1
-        elif search.kind == "grid":
-            candidate_upper_bound = 1
-            for axis in search.axes:
-                candidate_upper_bound *= len(axis.values)
-        else:
-            per_readout = sum(len(axis.values) for axis in search.axes) * (
-                search.rounds + 1
-            )
-            candidate_upper_bound = per_readout * len(case.trial.readouts)
         planned.append(
             {
                 "case_id": case.case_id,
@@ -203,10 +550,11 @@ def plan_study(spec: StudySpec) -> dict[str, Any]:
                 "readout_ids": [
                     readout.id for readout in case.trial.readouts
                 ],
+                "workload": case_workload,
             }
         )
     return {
-        "schema_version": "pol-study-plan-v3",
+        "schema_version": "pol-study-plan-v4",
         "study": spec.name,
         "profile": spec.profile,
         "case_count": len(cases),
@@ -215,6 +563,7 @@ def plan_study(spec: StudySpec) -> dict[str, Any]:
             for case in planned
         ),
         "cases": planned,
+        "workload": workload,
         "skipped": skipped,
         "filesystem_mutation": False,
     }

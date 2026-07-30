@@ -8,9 +8,10 @@ from typing import Literal
 from pydantic import Field, PositiveFloat, PositiveInt, field_validator, model_validator
 
 from pol.config.models import FiniteInputSpec, FourierOutputSpec, StrictModel
+from pol.config.names import validate_safe_path_component
 
 
-DIGITAL_BASELINE_SCHEMA_VERSION = "pol-digital-baseline-v1"
+DIGITAL_BASELINE_SCHEMA_VERSION = "pol-digital-baseline-v3"
 
 
 class FNO1dCandidateSpec(StrictModel):
@@ -30,8 +31,18 @@ class FNO1dCandidateSpec(StrictModel):
 class FNO1dModelSpec(StrictModel):
     kind: Literal["fno1d"] = "fno1d"
     activation: Literal["gelu"] = "gelu"
-    coordinate_channel: Literal["unit_periodic"] = "unit_periodic"
+    coordinate_channel: Literal["none", "periodic_sin_cos"] = "none"
     candidates: tuple[FNO1dCandidateSpec, ...]
+
+    @field_validator("coordinate_channel", mode="before")
+    @classmethod
+    def _reject_legacy_ramp(cls, value: object) -> object:
+        if value == "unit_periodic":
+            raise ValueError(
+                "legacy unit_periodic ramp is not periodic; migrate explicitly "
+                "to 'none' or 'periodic_sin_cos'"
+            )
+        return value
 
     @model_validator(mode="after")
     def _candidate_ids(self) -> "FNO1dModelSpec":
@@ -153,7 +164,7 @@ class DigitalExecutionSpec(StrictModel):
 
 
 class DigitalBaselineSpec(StrictModel):
-    schema_version: Literal["pol-digital-baseline-v1"] = (
+    schema_version: Literal["pol-digital-baseline-v3"] = (
         DIGITAL_BASELINE_SCHEMA_VERSION
     )
     name: str = Field(min_length=1)
@@ -169,12 +180,14 @@ class DigitalBaselineSpec(StrictModel):
     reporting: DigitalReportingSpec = Field(default_factory=DigitalReportingSpec)
     execution: DigitalExecutionSpec = Field(default_factory=DigitalExecutionSpec)
 
-    @field_validator("name")
+    @field_validator("name", "profile")
     @classmethod
-    def _safe_name(cls, value: str) -> str:
-        if not value.strip() or "/" in value or "\\" in value:
-            raise ValueError("digital baseline name must be nonblank and path-safe")
-        return value
+    def _safe_output_components(cls, value: str, info: object) -> str:
+        field_name = str(getattr(info, "field_name", "path component"))
+        return validate_safe_path_component(
+            value,
+            field=f"digital baseline {field_name}",
+        )
 
     @model_validator(mode="after")
     def _interfaces(self) -> "DigitalBaselineSpec":
@@ -216,10 +229,14 @@ def plan_digital_baseline(
     )
     evaluation_models = len(spec.training.evaluation_seeds)
     return {
-        "schema_version": "pol-digital-baseline-plan-v1",
+        "schema_version": "pol-digital-baseline-plan-v2",
         "name": spec.name,
         "profile": spec.profile,
         "model_kind": spec.model.kind,
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": (
+            1 if spec.model.coordinate_channel == "none" else 3
+        ),
         "candidate_count": len(spec.model.candidates),
         "selection_seed_count": len(spec.training.selection_seeds),
         "evaluation_seed_count": len(spec.training.evaluation_seeds),

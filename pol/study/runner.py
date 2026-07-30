@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 import torch
 
-from pol.config.loader import load_dataset_spec
+from pol.config.loader import load_dataset_spec, load_validation_spec
 from pol.config.models import (
     ConvergenceSpec,
     HeatMultiplierDiagnosticSpec,
@@ -17,7 +17,10 @@ from pol.config.models import (
     TrialSpec,
 )
 from pol.data.dataset import ensure_dataset
-from pol.plotting.reporters import generate_reporters
+from pol.plotting.reporters import (
+    expected_reporter_outputs,
+    generate_reporters,
+)
 from pol.runtime.artifacts import RunTransaction
 from pol.runtime.device import (
     require_cpu_tensors,
@@ -134,11 +137,37 @@ def plan_study(
             spec,
             repo_root=root,
         ).spec
-    plan = _plan_study(planned_spec)
+    dataset_spec = load_dataset_spec(
+        planned_spec.dataset_spec,
+        repo_root=root,
+    )
+    validation_spec = load_validation_spec(
+        dataset_spec.validation_spec,
+        repo_root=root,
+    )
+    plan = _plan_study(
+        planned_spec,
+        canonical_n_train=int(validation_spec.samples.n_train),
+    )
     plan["selection_dependencies"] = dependencies
     plan["scientific_conditions_resolved"] = dependencies[
         "scientific_conditions_resolved"
     ]
+    if (
+        dependencies["status"] != "completed"
+        and dependencies["dependencies"]
+    ):
+        plan["workload"] = {
+            "schema_version": "pol-study-workload-plan-v1",
+            "status": "unresolved_selection_dependency",
+            "counts": None,
+        }
+        for case in plan["cases"]:
+            case["workload"] = {
+                "schema_version": "pol-study-workload-case-v1",
+                "status": "unresolved_selection_dependency",
+                "counts": None,
+            }
     return plan
 
 
@@ -184,7 +213,15 @@ def regenerate_plots(
         )
         summary_path = staging / "run_summary.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        expected = sorted(expected_reporter_outputs(spec.reporters))
         summary["figures"] = created
+        summary["expected_figures"] = expected
+        summary["configured_reporter_count"] = len(spec.reporters)
+        summary["report_expected_file_count"] = len(expected)
+        summary["report_generated_file_count"] = len(created)
+        summary["report_completion_policy"] = (
+            "configured_reporter_exactly_one_file_per_format_v1"
+        )
         summary["report_status"] = "complete"
         summary["report_source"] = "verified_completed_run_read_only"
         write_strict_json(summary_path, summary)
@@ -340,6 +377,10 @@ def _run_convergence_checks(
     cases: list[StudyCase],
     outcomes: Mapping[str, SearchOutcome],
     evaluations: Mapping[tuple[str, str], CandidateEvaluation],
+    materialized_models: Mapping[
+        tuple[str, str, str],
+        Mapping[str, Any],
+    ],
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     statuses: dict[str, str] = {}
@@ -349,8 +390,12 @@ def _run_convergence_checks(
             spec.selection.representative_readout
         ]
         selected = evaluations[(case.case_id, representative_id)]
-        model = selected.frozen_models[
-            spec.selection.representative_readout
+        model = materialized_models[
+            (
+                case.case_id,
+                representative_id,
+                spec.selection.representative_readout,
+            )
         ]
         status, case_rows = _evaluate_convergence(
             spec=spec,
@@ -368,6 +413,27 @@ def _run_convergence_checks(
             f"{statuses}"
         )
     return statuses, rows
+
+
+def _materialize_selected_models(
+    *,
+    cases: list[StudyCase],
+    outcomes: Mapping[str, SearchOutcome],
+    evaluations: Mapping[tuple[str, str], CandidateEvaluation],
+    engine: TrialEngine,
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    models: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for case in cases:
+        outcome = outcomes[case.case_id]
+        for readout_id, candidate_id in outcome.selected_by_readout.items():
+            evaluation = evaluations[(case.case_id, candidate_id)]
+            models[(case.case_id, candidate_id, readout_id)] = (
+                engine.materialize_selected_readout(
+                    evaluation,
+                    readout_id=readout_id,
+                )
+            )
+    return models
 
 
 def _run_diagnostics(
@@ -552,6 +618,13 @@ def run_study(
         selection_source_provenance=selection_source_provenance,
     )
     all_skipped = [*expansion_skipped, *search_skipped]
+    materialized_models = _materialize_selected_models(
+        cases=cases,
+        outcomes=outcomes,
+        evaluations=all_evaluations,
+        engine=engine,
+    )
+    materialization_workload = dict(engine.materialization_stats)
     convergence_statuses, convergence_rows = _run_convergence_checks(
         spec=spec,
         dataset=dataset,
@@ -559,6 +632,7 @@ def run_study(
         cases=cases,
         outcomes=outcomes,
         evaluations=all_evaluations,
+        materialized_models=materialized_models,
     )
     preparation = prepare_freeze(
         spec=spec,
@@ -566,6 +640,8 @@ def run_study(
         cases=cases,
         outcomes=outcomes,
         evaluations=all_evaluations,
+        materialized_models=materialized_models,
+        materialization_workload=materialization_workload,
         convergence_statuses=convergence_statuses,
         selection_source_provenance=selection_source_provenance,
     )
@@ -607,6 +683,7 @@ def run_study(
             if first_test:
                 events.append(
                     {
+                        "schema_version": "pol-study-event-v1",
                         "event": "first_test_state_solve",
                         "plan_content_hash": persisted.frozen_plan_hash,
                     }
@@ -622,6 +699,7 @@ def run_study(
             if first_test:
                 events.append(
                     {
+                        "schema_version": "pol-study-event-v1",
                         "event": "first_test_metric",
                         "plan_content_hash": persisted.frozen_plan_hash,
                     }
@@ -747,6 +825,7 @@ def run_study(
             prediction_capture_content_hash=(
                 prediction_capture_content_hash
             ),
+            materialization_workload=materialization_workload,
         )
         write_completion_records(
             staging,

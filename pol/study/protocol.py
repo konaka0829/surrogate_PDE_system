@@ -404,6 +404,11 @@ def prepare_freeze(
     cases: list[StudyCase],
     outcomes: Mapping[str, SearchOutcome],
     evaluations: Mapping[tuple[str, str], CandidateEvaluation],
+    materialized_models: Mapping[
+        tuple[str, str, str],
+        Mapping[str, Any],
+    ],
+    materialization_workload: Mapping[str, int],
     convergence_statuses: Mapping[str, str],
     selection_source_provenance: Mapping[str, Mapping[str, Any]],
 ) -> FreezePreparation:
@@ -413,8 +418,19 @@ def prepare_freeze(
         outcomes=outcomes,
         evaluations=evaluations,
     )
+    lifecycle = {
+        "policy": (
+            "selected_candidate_readout_only_after_validation_selection_v1"
+        ),
+        "materialization_split": "train_validation_only",
+        "evaluation_seed_metrics_used_for_selection": False,
+        **{
+            str(key): int(value)
+            for key, value in materialization_workload.items()
+        },
+    }
     selection_record = {
-        "schema_version": "pol-selection-record-v8",
+        "schema_version": "pol-selection-record-v9",
         **execution_device_policy(),
         "study": spec.name,
         "profile": spec.profile,
@@ -437,6 +453,7 @@ def prepare_freeze(
         },
         "cases": selection_cases,
         "convergence": dict(convergence_statuses),
+        "random_feature_lifecycle": lifecycle,
         "test_data_used": False,
     }
     assert_selection_record_safe(selection_record)
@@ -448,6 +465,22 @@ def prepare_freeze(
         for readout_id, candidate_id in outcome.selected_by_readout.items():
             evaluation = evaluations[(case.case_id, candidate_id)]
             key = _model_key(case.case_id, candidate_id, readout_id)
+            model = materialized_models.get(
+                (case.case_id, candidate_id, readout_id)
+            )
+            if not isinstance(model, Mapping):
+                raise ValueError("selected readout was not materialized")
+            if model.get("kind") == "random_feature_ridge" and (
+                model.get("members_materialized") is not True
+                or model.get("materialization_split")
+                != "train_validation_only"
+                or model.get("evaluation_seed_metrics_used_for_selection")
+                is not False
+            ):
+                raise ValueError(
+                    "selected random-feature readout has an invalid "
+                    "materialization lifecycle"
+                )
             frozen_models[key] = {
                 "case_id": case.case_id,
                 "variant_id": case.variant_id,
@@ -455,16 +488,17 @@ def prepare_freeze(
                 "readout_id": readout_id,
                 "trial": evaluation.trial.model_dump(mode="python"),
                 "training_subset": dict(evaluation.training_subset),
-                "model": evaluation.frozen_models[readout_id],
+                "model": dict(model),
             }
     frozen_archive = {
-        "schema_version": "pol-frozen-model-archive-v9",
+        "schema_version": "pol-frozen-model-archive-v10",
         **execution_device_policy(),
         "selection_record_hash": selection_hash,
         "selection_source_provenance": {
             key: dict(value)
             for key, value in selection_source_provenance.items()
         },
+        "random_feature_lifecycle": lifecycle,
         "models": frozen_models,
     }
     require_cpu_tensors(
@@ -496,10 +530,20 @@ def persist_and_read_back_freeze(
     )
     events = [
         {
+            "schema_version": "pol-study-event-v1",
             "event": "selection_complete",
             "selection_record_hash": selection_hash,
         },
         {
+            "schema_version": "pol-study-event-v1",
+            "event": "evaluation_members_materialized",
+            "selection_record_hash": selection_hash,
+            "random_feature_lifecycle": preparation.selection_record[
+                "random_feature_lifecycle"
+            ],
+        },
+        {
+            "schema_version": "pol-study-event-v1",
             "event": "convergence_complete",
             "status": dict(convergence_statuses),
         },
@@ -507,7 +551,7 @@ def persist_and_read_back_freeze(
     atomic_torch_save(staging / "frozen_models.pt", preparation.frozen_archive)
     model_file_hash = file_sha256(staging / "frozen_models.pt")
     frozen_plan = {
-        "schema_version": "pol-frozen-evaluation-plan-v9",
+        "schema_version": "pol-frozen-evaluation-plan-v10",
         **execution_device_policy(),
         "study": spec.name,
         "dataset_artifact_id": dataset.artifact_id,
@@ -523,6 +567,9 @@ def persist_and_read_back_freeze(
             key: dict(value)
             for key, value in selection_source_provenance.items()
         },
+        "random_feature_lifecycle": preparation.selection_record[
+            "random_feature_lifecycle"
+        ],
         "frozen_models_file": "frozen_models.pt",
         "frozen_models_sha256": model_file_hash,
         "cases": {
@@ -573,6 +620,7 @@ def persist_and_read_back_freeze(
     write_strict_json(staging / "frozen_evaluation_plan.json", frozen_plan)
     events.append(
         {
+            "schema_version": "pol-study-event-v1",
             "event": "freeze_written",
             "plan_content_hash": frozen_plan_hash,
         }
@@ -662,7 +710,7 @@ def persist_and_read_back_freeze(
         map_location="cpu",
         weights_only=True,
     )
-    if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v9":
+    if loaded_archive.get("schema_version") != "pol-frozen-model-archive-v10":
         raise ValueError("unsupported frozen model archive schema")
     verify_execution_device_policy(
         loaded_archive,
@@ -675,6 +723,13 @@ def persist_and_read_back_freeze(
     )
     if loaded_archive.get("selection_record_hash") != selection_hash:
         raise ValueError("frozen model archive selection binding mismatch")
+    lifecycle = loaded_selection.get("random_feature_lifecycle")
+    if (
+        not isinstance(lifecycle, Mapping)
+        or loaded_plan.get("random_feature_lifecycle") != lifecycle
+        or loaded_archive.get("random_feature_lifecycle") != lifecycle
+    ):
+        raise ValueError("random-feature lifecycle binding mismatch")
     verify_selection_source_provenance_bindings(
         selection=loaded_selection,
         plan=loaded_plan,
@@ -694,6 +749,7 @@ def persist_and_read_back_freeze(
     )
     events.append(
         {
+            "schema_version": "pol-study-event-v1",
             "event": "freeze_read_back",
             "plan_content_hash": frozen_plan_hash,
         }

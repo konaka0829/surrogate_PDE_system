@@ -130,9 +130,12 @@ study.verification ────────┘
 `pol.study.evaluation` owns metric wrappers, representation-floor evaluation,
 independent-seed statistics, immutable evaluation results, and pure row
 construction. `pol.study.readouts` owns validation-time readout fitting,
-readout-local hyperparameter selection, frozen payload construction, and
-frozen prediction. Neither module owns dataset splits, feature-state solves,
-filesystem transactions, or test-access timing.
+readout-local hyperparameter selection, selected random-feature recipe
+materialization, frozen payload construction, and frozen prediction. During
+random-feature selection it reuses each seeded random map and its lifted
+train/validation tensors across ridge candidates. Evaluation-seed members are
+not fitted for rejected candidates. Neither module owns dataset splits,
+feature-state solves, filesystem transactions, or test-access timing.
 
 `pol.study.trial.TrialEngine` coordinates one validated trial: it obtains the
 finite `n_tar` view, requests cached `n_sur` feature states, observes `J`
@@ -166,7 +169,10 @@ axis, and a static search. No alternate scalar or matrix runner exists.
 
 Each selection candidate is evaluated on train/validation data. Readout-local
 hyperparameters—ridge values and random-feature settings—are also selected on
-validation data. After convergence checks, the runner writes:
+validation data. A selected random-feature candidate initially carries a
+recipe rather than evaluation-seed members. Once study-level selection is
+complete, the runner materializes those members from train/validation data
+only for the selected case/readout, runs convergence checks, and writes:
 
 1. `selection_record.json`;
 2. `frozen_models.pt`;
@@ -174,7 +180,9 @@ validation data. After convergence checks, the runner writes:
 
 It hashes and reads the latter two files back. Only then does it request test
 feature states or compute test metrics. `events.json` makes this ordering
-auditable.
+auditable, including the selected-only evaluation-member materialization
+event. The selection record states that evaluation-member validation metrics
+were not used for selection.
 
 ## 6. Content addressing
 

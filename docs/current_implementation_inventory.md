@@ -1,10 +1,58 @@
 # Current implementation inventory
 
-This inventory describes the code present through the optional digital
-operator baseline after Review Gate A/B and the study responsibility
-refactors. It is a
-characterization of the current implementation, not a claim that every
-implemented behavior is scientifically final.
+This inventory separates the active implementation from historical
+transitions and work that has not yet been executed or verified. It is a
+characterization of package `0.2.29`, not a claim that checked-in main plans
+have produced scientific results.
+
+## Current active implementation
+
+The active write-side contracts are:
+
+| Artifact responsibility | Active contract |
+|---|---|
+| package/environment | package `0.2.29`; `pol-numerical-environment-v2` |
+| validation | config through `pol-validation-v6`; identity/certificate `v12`; foundation contract `v8` |
+| dataset | `pol-dataset-v3`; binding proof `v7`; identity/metadata/archive/resolved families `v5` |
+| study plan and identity | `pol-study-plan-v4`; run identity `v15`; workload plan/case `v1` |
+| study freeze and results | selection `v9`; frozen archive/plan `v10`; result row `v3`; event `v1` |
+| completed study | run manifest/summary `v16`; dataset reference `v3`; prediction capture `v1` |
+| cross-run report | `pol-report-v1` and corresponding report artifact `v1` families |
+| digital FNO adapter | config `v3`; run identity/manifest/summary `v4`; selection/checkpoint/plan `v3`; source reference/fairness row `v3` |
+
+Older schemas accepted by read-only selection-source verification are
+migration inputs, not active-write versions.
+
+Maintenance validation for this release completed with Python 3 compilation,
+646 tests, `scripts/check.sh`, the full smoke workflow, the read-only main plan
+audit, and wheel construction passing. The smoke workflow exercised all three
+validations, both datasets, nine studies, the optional FNO adapter, and the
+four-source report. This is execution-path evidence only: no main profile was
+run and no main scientific result is claimed.
+
+### Checked-in configuration catalog
+
+Every family below has a smoke profile for maintenance and a main profile that
+is declaration-only until an operator explicitly passes the production gates.
+
+| Kind | Main | Smoke |
+|---|---|---|
+| validation | `configs/validation/foundation_main.json` | `configs/validation/foundation_smoke.json` |
+| validation | `configs/validation/heat_main.json` | `configs/validation/heat_smoke.json` |
+| validation | `configs/validation/reaction_diffusion_main.json` | `configs/validation/reaction_diffusion_smoke.json` |
+| dataset | `configs/datasets/heat_main.json` | `configs/datasets/heat_smoke.json` |
+| dataset | `configs/datasets/burgers_main.json` | `configs/datasets/burgers_smoke.json` |
+| study | `studies/heat_readout_calibration.json` | `studies/heat_readout_calibration_smoke.json` |
+| study | `studies/surrogate_parameter_time_coordinate_search.json` | `studies/surrogate_parameter_time_coordinate_search_smoke.json` |
+| study | `studies/surrogate_parameter_time_landscape.json` | `studies/surrogate_parameter_time_landscape_smoke.json` |
+| study | `studies/dynamic_feature_baseline_comparison.json` | `studies/dynamic_feature_baseline_comparison_smoke.json` |
+| study | `studies/readout_stability_noise.json` | `studies/readout_stability_noise_smoke.json` |
+| study | `studies/learning_curve.json` | `studies/learning_curve_smoke.json` |
+| study | `studies/random_feature_seed_statistics.json` | `studies/random_feature_seed_statistics_smoke.json` |
+| study | `studies/observation_output_budget.json` | `studies/observation_output_budget_smoke.json` |
+| study | `studies/input_simulation_resolution.json` | `studies/input_simulation_resolution_smoke.json` |
+| digital baseline | `digital_baselines/fno1d.json` | `digital_baselines/fno1d_smoke.json` |
+| cross-run report | `reports/surrogate_operator_summary.json` | `reports/surrogate_operator_summary_smoke.json` |
 
 ## Validation
 
@@ -92,9 +140,10 @@ requested fine steps. Reaction-diffusion rows store `dt` and
 ## Execution device policy
 
 The public first-paper artifact workflow is CPU-only. Validation schema
-`pol-validation-v5` accepts only `samples.device="cpu"` and rejects CUDA,
+`pol-validation-v6` accepts only `samples.device="cpu"` and rejects CUDA,
 automatic selection, and unknown devices before execution, independently of
-`torch.cuda.is_available()`.
+`torch.cuda.is_available()`; existing v5 heat/Burgers configurations remain
+accepted migration inputs.
 
 `pol.runtime.device` is the single source of truth for
 `execution_device_policy="cpu_only"` and `compute_device="cpu"`. These values
@@ -214,8 +263,6 @@ variant-level changes to the information budget or readout candidates and
 requires verified Phase-3 selection sources for all dynamic families. Static
 resolution rows are explicitly labeled as encoding-consistency checks and do
 not claim PDE convergence.
-evaluation path, although no standalone checked-in study JSON currently
-selects it.
 
 The implemented observation is L2-scaled equispaced point observation of the
 source-grid trigonometric interpolant.
@@ -233,7 +280,11 @@ source-grid trigonometric interpolant.
   regularization and an SVD minimum-norm path at zero regularization (Model 2);
 - `random_feature_ridge`: skip-connected random nonlinear features followed
   by centered affine ridge regression, with separate selection and evaluation
-  seed sets (Model 3). Evaluation requires at least two distinct seeds.
+  seed sets (Model 3). Selection caches each seeded map and its lifted
+  train/validation tensors across ridge values. Candidate results carry a
+  recipe; evaluation members are fitted only for the study-selected
+  case/readout, from train/validation data, before the persisted freeze
+  boundary. Evaluation requires at least two distinct seeds.
 
 Display names do not control dispatch.
 
@@ -292,6 +343,19 @@ scalar, sweep, verification, or plots-only execution path.
 | `observation_output_budget` | How does performance vary over the distinct `J x q` observation/output budget at fixed `n_tar` and `n_sur`, for the Phase 3-selected Burgers and reaction-diffusion systems and each direct/affine/random readout? |
 | `input_simulation_resolution` | How does performance vary over the distinct `n_tar x n_sur` finite-data/surrogate-resolution budget at fixed `J` and `q`, for the Phase 3-selected Burgers and reaction-diffusion systems and each direct/affine/random readout? |
 
+The current documentation groups these semantic responsibilities as follows:
+
+| Phase | Semantic responsibility |
+|---|---|
+| Phase 3 | validation-only surrogate-parameter/readout-time coordinate search, complete Cartesian landscape, representative-condition selection, and downstream selection-source binding |
+| Phase 4 | separate `J x q` observation/output and `n_tar x n_sur` finite/surrogate-resolution studies |
+| Phase 5 | static-versus-dynamic feature comparison at one shared information budget and validation-selected dynamic conditions |
+| Phase 6 | readout stability under feature noise, nested-prefix learning curves, and independent random-feature seed statistics |
+| Phase 7 | predeclared prediction capture, verified-run single-study reporters, and verified-source cross-run phase diagrams/baseline tables |
+
+These are current semantic groupings, not a correspondence to publication
+labels E3--E7 or to figure numbers.
+
 Each family has a smoke and a main profile. Only smoke/tiny profiles belong in
 automated checks or maintenance work.
 
@@ -344,7 +408,7 @@ and planned; no main numerical result is claimed.
 
 `pol.digital_baselines` implements one CPU-only 1D FNO without adding a
 physical readout kind or a second physical StudyRunner. `protocol.py` owns the
-strict `pol-digital-baseline-v1` schema and pure budget plan, `datasets.py`
+strict `pol-digital-baseline-v3` schema and pure budget plan, `datasets.py`
 owns train/validation/test finite-view boundaries and train-only
 standardization, `fno1d.py` owns spectral/local layers and real-scalar
 parameter counting, `evaluation.py` owns deterministic training and
@@ -354,9 +418,11 @@ and completed-run verification.
 
 The checked-in smoke/main configurations use the exact Burgers
 dynamic-feature baseline as a predeclared physical source and list all 12
-physical variant/readout rows before evaluation. Digital inputs are only the
-finite `n_tar` field plus a dimensionless periodic coordinate. Predictions
-are `q` real Fourier coefficients and use the existing
+physical variant/readout rows before evaluation. The periodic Burgers
+baseline supplies only the finite `n_tar` field and uses no absolute
+coordinate channel, preserving circular-shift equivariance. The optional
+periodic sin/cos policy is explicit and the removed ramp is rejected.
+Predictions are `q` real Fourier coefficients and use the existing
 `fourier_prediction_metrics`/representation-floor implementation.
 
 Selection seeds choose the candidate architecture and epoch using validation
@@ -367,9 +433,13 @@ separate table. The selection record, checkpoint archive, and evaluation plan
 are persisted, byte/tensor hashed, and read back before `build_test_view`.
 
 The fairness table binds the exact dataset/split, input/output dimensions,
-parameter count, validation metric, reference/data metrics and floors, seed
-statistics, source/condition hashes, and the physical-versus-digital inference
-path. Digital training time is recorded, but energy is unmeasured and
+per-independent-realization trainable, fixed-random, and total stored
+real-scalar counts, pre/post-lift feature dimensions, all-realization storage,
+validation metrics, reference/data metrics and floors, seed statistics,
+source/condition hashes, and the physical-versus-digital inference path.
+Counts are reconstructed from frozen tensors and exclude the physical
+dynamics and hardware resources. Digital training time is recorded, but
+energy is unmeasured and
 wall-clock/energy comparison is disabled because the physical source lacks a
 common measurement protocol.
 
@@ -381,12 +451,15 @@ implemented.
 
 Production readiness is operationally fixed by
 `docs/production_runbook.md`, `scripts/plan_main.py`, and the stage-gated
-`scripts/run_main.sh`. Audit schema `pol-production-plan-audit-v2`
+`scripts/run_main.sh`. Audit schema `pol-production-plan-audit-v3`
 strict-parses three validations, two datasets, nine studies, one digital
-baseline, and one cross-run report and reports exact pure-plan counts plus
-missing/completed dependency state. It performs no main
-execution. Every mutating main stage requires `POL_CONFIRM_MAIN=YES`, and no
-all-in-one stage exists. At this maintenance checkpoint, all downstream main
+baseline, and one cross-run report. It reports exact map/lift/ridge/SVD and
+selected-only evaluation-member fit budgets, shape/convergence/diagnostic
+budgets, and missing/completed dependency state. Unresolved selection-bound
+studies report null workload counts. It performs no main execution. Every
+mutating main stage requires `POL_CONFIRM_MAIN=YES`, no all-in-one stage
+exists, and the workload block requires human capacity approval before the
+first main stage. At this maintenance checkpoint, all downstream main
 dependencies remain intentionally missing because no main profile has been
 run.
 
@@ -458,53 +531,57 @@ results and do not receive placeholder seed uncertainty.
   bind source run/selection/freeze identities into downstream identity and
   freeze artifacts. Pure plans expose missing dependency status without a
   placeholder scientific value.
-- Study configuration and pure-plan schemas are `pol-study-v3` and
-  `pol-study-plan-v3`. Study-run identity remains `v8`; newly written
-  manifest/summary schemas use `v9` and bind
-  `pol-study-result-row-v1`. Verified `v8` runs remain readable as Phase 3
-  selection sources. Selection, frozen-plan, and frozen-model schemas use `v7`;
-  `dataset_reference.json` uses `v3`.
-  Heat coefficient rows use `pol-heat-multiplier-coefficient-v2` and
-  case/readout summaries use `pol-heat-multiplier-summary-v1`.
-  Phase 2-05B validation identity/certificate use `v12`, the foundation
-  contract uses `v8`, the field quadrature check is
-  `pol-field-quadrature-check-v1`, and the matched pipeline check remains
-  `pol-matched-model1-pipeline-check-v1`. The generic target-reference
-  contract remains `v4`, and the nested cross-solver spec/check remain
-  `v1`/`v2`. Dataset binding proofs use `v7`. Dataset identity, metadata,
-  archive, and resolved-spec families use `v5`; initial-condition archives
-  remain at `v4`, foundation/master bindings at `v3`, and feature-state
-  identity/archive/metadata at `v2`.
-- Numerical-environment schema `pol-numerical-environment-v2` and package
-  version `0.2.16` are content-hash inputs. Validation artifacts without the
-  field-quadrature and matched-pipeline suites, actual-step refinement proof,
-  and reconstructable convergence rows cannot share an identity with current
-  results.
-  Package version `0.2.13` recorded the preceding field-quadrature contract;
-  `0.2.14` separates the heat-diagnostic/run tables, `0.2.15` separates
-  Cartesian landscape/representative-selection/metric-map artifacts, and
-  `0.2.16` separates completed-source-bound downstream studies. Package version
-  `0.2.6` previously separated post-Phase-2-01 odd-grid
-  results from version `0.2.5`. Metric, readout, initial-condition, and
-  dataset artifact schemas are unchanged. The earlier sampler, domain, CPU,
-  target-reference binding, decoder-diagnostic, split IDs, and frozen-test
-  proof semantics remain content-hash inputs.
+- The active study contracts are plan `v4`, identity `v15`, selection `v9`,
+  frozen archive/plan `v10`, result row `v3`, event `v1`, and completed
+  manifest/summary `v16`. Random-feature lifecycle fields bind selected-only
+  evaluation-member materialization and its operation counts across those
+  artifacts. `dataset_reference.json` remains `v3`.
+- Validation identity/certificate remain `v12`, the foundation contract
+  remains `v8`, dataset binding proofs remain `v7`, and the field quadrature
+  and matched Model 1 checks remain independently versioned. The numerical
+  environment is `v2` and records active package version `0.2.29`.
 - Plot-only regeneration requires an existing verified run and is
   transactional.
-- Package version `0.2.23` adds the independent
-  `pol-digital-baseline-v1` configuration and `pol-digital-*-v1`
-  run/freeze/table contracts. Physical study schemas and metric formulas are
-  unchanged.
+- Scientific JSON and CLI overrides reject non-finite constants at parse/model
+  boundaries, including nested values. Output directory components and
+  reporter filenames are path-safe basenames, configured reporters must
+  produce their exact declared file set, and transactional failure preserves
+  a prior verified run.
+- The digital baseline verifies source provenance without parsing physical
+  test values before its own freeze/read-back boundary. Fairness parameter
+  counts are tensor-cross-checked trainable/fixed/total real scalars per
+  realization, with all-realization storage reported separately.
+- Backend numerical regression tests use analytic or independent same-runtime
+  references and tolerances rather than fixed FFT/SVD/solve byte hashes.
 
 The smoke heat calibration has been exercised during maintenance. No main
 heat-calibration profile or production-resolution result is claimed here.
 
-## Characterization and correction coverage through Phase 2-05B
+## Historical phase and schema transitions
 
-The P0 rows below characterize or extend the previously established contracts.
-The final row records the focused Phase 2-01 scientific correction and its
-numerical-preservation evidence. Phase 2-05B preserves metric formulas and
-adds only independently justified input validation.
+The table records why older versions may appear in migration code or archived
+artifacts. It does not redefine the active versions above.
+
+| Release/transition | Historical responsibility |
+|---|---|
+| `0.2.6`--`0.2.16` | odd-grid Burgers correction; validated split/binding, quadrature, heat diagnostics, Cartesian landscape, and selection-source contracts |
+| `0.2.23` | first independent digital-baseline adapter and its initial artifact families |
+| `0.2.24` | strict finite scientific JSON/model/override boundaries |
+| `0.2.25` | path-safe artifact components and fail-closed reporter output sets |
+| `0.2.26` | pre-freeze digital physical-source test isolation |
+| `0.2.27` | tensor-cross-checked real-scalar fairness parameter accounting |
+| `0.2.28` | periodic FNO coordinate policy: default `none`, optional `periodic_sin_cos`, rejected legacy ramp |
+| `0.2.29` | selected-only random-feature evaluation-member materialization and workload plan/audit v3 |
+
+The portable numerical-regression audit changed tests only; it did not change
+package, artifact, or scientific schema versions.
+
+## Characterization and correction coverage
+
+The rows below point to focused characterization or correction coverage for
+the reusable numerical and artifact contracts. Later Phase 3--7 workflow
+coverage is exercised by study, reporting, digital-baseline, and production
+readiness tests in addition to the smoke workflow.
 
 | Contract | Characterization coverage |
 |---|---|
@@ -524,17 +601,22 @@ adds only independently justified input validation.
 | physical-domain GRF covariance and `L=1` regression | `tests/test_numerics.py::test_grf_unit_domain_output_matches_pre_p0_03_regression`, `test_grf_mode_amplitudes_follow_physical_domain_scaling`, and `test_grf_even_grid_nyquist_uses_physical_wavenumber` |
 | GRF domain provenance and tamper rejection | `tests/test_validation_data.py::test_nonunit_domain_is_bound_across_grf_archive_and_certificate` and the sampler-domain proof/certificate tamper tests in `tests/test_dataset_binding.py` |
 | CPU-only configuration, boundary placement, provenance, and tamper rejection | `tests/test_device_policy.py`, covering CPU/default acceptance; CUDA/auto rejection under both mocked availability states; no CUDA availability query in resolution; CPU master/dataset/feature/frozen tensors; environment, certificate, proof, identity, and summary policy copies; binding-proof and study-summary policy tamper; and a non-CPU boundary error |
-| P0-04 CPU numerical preservation | `tests/test_device_policy.py::test_p0_04_cpu_deterministic_archive_regression`, which fixes exact tensor hashes for the pre-P0-04 tiny seed/configuration; the pre-existing unit-domain regression and feature-state batching-invariance test remain in force |
+| CPU GRF numerical semantics and portability | `tests/test_device_policy.py` compares seeded coefficients and inverse FFT output against an independently constructed odd/even, float32/float64, non-unit-domain reference, with explicit DC/Nyquist handling and a mutation check; no backend FFT byte hash is treated as a cross-version numerical oracle |
 | P0-05 fixed-decoder bandwidth formulas and numerical preservation | parameterized odd/even and below/equal/above-bandwidth tests in `tests/test_learning.py`, including invalid-input rejection, observable-prefix recovery, exact suffix zeros, and exact equality with the pre-diagnostic tensor construction |
 | P0-05 decoder artifact binding and tamper rejection | `tests/test_study.py::test_direct_decoder_diagnostic_is_bound_across_study_artifacts`, diagnostic-tamper cases, and the frozen-mismatch pre-test guard |
 | P0-05 `J x q` independence and foundation characterization | `tests/test_study.py::test_checked_in_observation_output_budget_keeps_q_greater_than_J_cells` and `tests/test_validation_data.py::test_foundation_validation_publishes_passing_certificate` |
 | Phase 2-01 split-step real-grid length and parity | `tests/test_numerics.py`, covering RFFT-width ambiguity, required explicit `nx`, independent nonlinear and short-trajectory mathematical references for `nx=15,16` with filtering off/on, same-runtime exact equality against a test-local pre-correction even-grid algorithm, spectral/mask/forcing mismatch rejection, and ETDRK4 parity characterization |
 | Review Gate B calibration/test isolation | `tests/test_validation_data.py`, `tests/test_config.py`, and `tests/test_dataset_binding.py`, covering exact preservation of pre-gate split IDs/hash, disjoint full coverage, checked-in smoke/main membership, pre-compute overlap rejection, certificate provenance, certificate/proof tamper rejection, and dataset binding/load reconstruction |
+| finite scientific configuration | `tests/test_finite_configuration.py` covers programmatic fields, strict file JSON, CLI overrides, nested JSON values, all config families, and pre-compute/pre-publication failure |
+| artifact names and fail-closed reporters | `tests/test_artifact_names_and_reporters.py` covers component policy, filename/format collisions, exact expected outputs, empty/missing/extra output rejection, transactional preservation, and completed-run tamper checks |
+| digital source isolation, parameter accounting, and coordinates | focused digital-baseline tests cover provenance-only preflight before freeze, delayed physical test parsing, tensor-cross-checked trainable/fixed/total counts, default coordinate-free circular equivariance, periodic sin/cos construction, and legacy-ramp rejection |
+| selected-only random-feature materialization and workload planning | `tests/test_random_feature_lazy.py` and `tests/test_production_readiness.py` cover fit/lift counters, cached maps/lifts, non-selection audit metrics, eager/lazy same-runtime equivalence, operation formulas, unresolved dependencies, and full main catalog enumeration |
+| numerical-hash classification | `tests/test_numerical_hash_inventory.py` binds the complete hard-coded hash inventory to `docs/numerical_hash_inventory.md`; random-feature and GRF tests use direct semantics or independent references instead of backend tensor byte goldens |
 
-## Missing or incomplete after Phase 2-05B
+## Not yet executed or verified
 
-The following are not implemented or are incomplete; they are not repaired in
-this task:
+The following limitations are current and must not be mistaken for completed
+main results:
 
 - Burgers main-profile convergence has been statically validated but not run
   or retrospectively certified during maintenance;
@@ -549,8 +631,9 @@ this task:
 - the fixed decoder still uses structural zero-fill outside the directly
   observable point-observation bandwidth; this is now explicit and
   artifact-bound, but it is not learned extrapolation;
-- there are no checked-in study specifications corresponding to the currently
-  undescribed E5, E6, or E7 questions;
+- the read-only main workload audit requires human CPU-memory, wall-time, and
+  storage approval before any production stage; no such approval or main
+  execution is recorded in this repository;
 - DeepONet is not implemented. FNO1d is implemented only as the independent
   digital baseline adapter; it is intentionally not a physical readout.
 
@@ -558,21 +641,11 @@ See `docs/known_scientific_risks.md` for code-level evidence and impact.
 
 ## Publication-label correspondence (reference only)
 
-The current repository contains no authoritative legacy E0--E7 mapping. The
-following rows for E0--E4 are inferred from `docs/migration.md` and the
-question-based study catalog; they are **not yet verified** against a legacy
-source tree. They must not be used for Python names or dispatch.
-
-| Publication label | Current semantic responsibility | Status |
-|---|---|---|
-| E0 | independent foundation validation in `pol.validation` | inferred, current implementation present |
-| E1 | heat readout calibration study | inferred, smoke/main JSON present |
-| E2 | coordinate parameter search and full parameter/readout-time landscape | inferred, current smoke/main JSON present |
-| E3 | `J x q` observation/output budget | inferred, smoke/main JSON present |
-| E4 | `n_tar x n_sur` finite/surrogate resolution map | inferred, smoke/main JSON present |
-| E5 | not identifiable from the current repository | not implemented; not yet verified |
-| E6 | not identifiable from the current repository | not implemented; not yet verified |
-| E7 | not identifiable from the current repository | not implemented; not yet verified |
-
-Figure-number correspondence is likewise absent and is intentionally not
-invented.
+The current repository contains no authoritative legacy E0--E7 or Figure
+mapping. Earlier documentation inferred E0--E4 from partial migration context,
+but those inferences are not an authoritative correspondence and are not
+repeated as active claims here. In particular, the absence of an E5--E7
+mapping says nothing about implementation: the current semantic Phase 5--7
+responsibilities are present in the study/report catalog above. Publication
+labels and figure numbers must remain documentation-only and must not control
+Python names, dispatch, schemas, or artifact kinds.

@@ -48,7 +48,7 @@ class ReadoutFitInputs:
 @dataclass(frozen=True)
 class FittedReadout:
     validation_values: dict[str, Any]
-    frozen_model: dict[str, Any]
+    selection_model: dict[str, Any]
     inner_selection: dict[str, Any]
 
 
@@ -107,7 +107,7 @@ def _fit_direct(
             **prefix_metrics(metrics, "validation"),
             **diagnostic,
         },
-        frozen_model={
+        selection_model={
             "kind": "direct_fourier_decoder",
             "q": inputs.q,
             "domain_length": inputs.domain_length,
@@ -169,7 +169,7 @@ def _fit_affine(
     zeta, metrics, fitted = chosen
     return FittedReadout(
         validation_values=metrics,
-        frozen_model=serialize_affine(fitted, zeta=zeta),
+        selection_model=serialize_affine(fitted, zeta=zeta),
         inner_selection={
             "zeta": zeta,
             "candidate_metrics": [
@@ -180,27 +180,41 @@ def _fit_affine(
     )
 
 
-def _random_feature_members(
+def materialize_random_feature_readout(
     readout: RandomFeatureRidgeReadoutSpec,
     inputs: ReadoutFitInputs,
-    chosen: Mapping[str, Any],
-) -> list[dict[str, Any]]:
+    recipe: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fit evaluation-seed members after study-level candidate selection."""
+    if (
+        recipe.get("kind") != "random_feature_ridge"
+        or recipe.get("members_materialized") is not False
+    ):
+        raise ValueError("random-feature materialization requires a recipe")
+    if (
+        recipe.get("activation") != readout.activation
+        or list(recipe.get("evaluation_seeds", []))
+        != list(readout.evaluation_seeds)
+    ):
+        raise ValueError(
+            "random-feature recipe disagrees with the selected readout"
+        )
     members: list[dict[str, Any]] = []
     for seed in readout.evaluation_seeds:
         random_map = RandomFeatureMap.create(
             inputs.x_train.shape[1],
-            int(chosen["width"]),
+            int(recipe["width"]),
             activation=readout.activation,
             seed=int(seed),
-            weight_scale=float(chosen["weight_scale"]),
-            bias_scale=float(chosen["bias_scale"]),
+            weight_scale=float(recipe["weight_scale"]),
+            bias_scale=float(recipe["bias_scale"]),
             dtype=inputs.x_train.dtype,
             device=inputs.x_train.device,
         )
         fitted = fit_centered_affine_ridge(
             random_map(inputs.x_train),
             inputs.y_train,
-            float(chosen["zeta"]),
+            float(recipe["zeta"]),
             svd_rcond=readout.svd_rcond,
         )
         validation_prediction = fitted(random_map(inputs.x_validation))
@@ -215,14 +229,32 @@ def _random_feature_members(
         )
         members.append(
             {
-                **serialize_affine(fitted, zeta=float(chosen["zeta"])),
+                **serialize_affine(fitted, zeta=float(recipe["zeta"])),
                 "seed": int(seed),
                 "A": random_map.A.detach().cpu(),
                 "c": random_map.c.detach().cpu(),
                 "evaluation_seed_validation_metrics": validation_metrics,
             }
         )
-    return members
+    model = {
+        key: value
+        for key, value in recipe.items()
+        if key not in {"evaluation_seeds", "members_materialized"}
+    }
+    model.update(
+        {
+            "members_materialized": True,
+            "materialization_split": "train_validation_only",
+            "evaluation_seed_metrics_used_for_selection": False,
+            "members": members,
+        }
+    )
+    require_cpu_tensors(
+        model,
+        boundary="frozen random-feature readout publication",
+        name="model",
+    )
+    return model
 
 
 def _fit_random_feature(
@@ -230,14 +262,22 @@ def _fit_random_feature(
     inputs: ReadoutFitInputs,
 ) -> FittedReadout:
     structural: list[dict[str, Any]] = []
-    for width, weight_scale, bias_scale, zeta in itertools.product(
+    lift_cache: dict[
+        tuple[int, float, float, int],
+        tuple[torch.Tensor, torch.Tensor],
+    ] = {}
+    for width, weight_scale, bias_scale in itertools.product(
         readout.widths,
         readout.weight_scales,
         readout.bias_scales,
-        readout.zetas,
     ):
-        seed_metrics: list[dict[str, float]] = []
         for seed in readout.selection_seeds:
+            cache_key = (
+                int(width),
+                float(weight_scale),
+                float(bias_scale),
+                int(seed),
+            )
             random_map = RandomFeatureMap.create(
                 inputs.x_train.shape[1],
                 int(width),
@@ -248,39 +288,52 @@ def _fit_random_feature(
                 dtype=inputs.x_train.dtype,
                 device=inputs.x_train.device,
             )
-            train_lift = random_map(inputs.x_train)
-            validation_lift = random_map(inputs.x_validation)
-            fitted = fit_centered_affine_ridge(
-                train_lift,
-                inputs.y_train,
-                float(zeta),
-                svd_rcond=readout.svd_rcond,
+            lift_cache[cache_key] = (
+                random_map(inputs.x_train),
+                random_map(inputs.x_validation),
             )
-            prediction = fitted(validation_lift)
-            seed_metrics.append(
-                prefix_metrics(
-                    evaluate_coefficients(
-                        prediction,
-                        inputs.y_validation,
-                        inputs.data_target_validation,
-                        inputs.reference_target_validation,
-                        n_tar=inputs.n_tar,
-                        n_ref=inputs.n_ref,
-                        domain_length=inputs.domain_length,
-                    ),
-                    "validation",
+        for zeta in readout.zetas:
+            seed_metrics: list[dict[str, float]] = []
+            for seed in readout.selection_seeds:
+                train_lift, validation_lift = lift_cache[
+                    (
+                        int(width),
+                        float(weight_scale),
+                        float(bias_scale),
+                        int(seed),
+                    )
+                ]
+                fitted = fit_centered_affine_ridge(
+                    train_lift,
+                    inputs.y_train,
+                    float(zeta),
+                    svd_rcond=readout.svd_rcond,
                 )
+                prediction = fitted(validation_lift)
+                seed_metrics.append(
+                    prefix_metrics(
+                        evaluate_coefficients(
+                            prediction,
+                            inputs.y_validation,
+                            inputs.data_target_validation,
+                            inputs.reference_target_validation,
+                            n_tar=inputs.n_tar,
+                            n_ref=inputs.n_ref,
+                            domain_length=inputs.domain_length,
+                        ),
+                        "validation",
+                    )
+                )
+            structural.append(
+                {
+                    "width": int(width),
+                    "weight_scale": float(weight_scale),
+                    "bias_scale": float(bias_scale),
+                    "zeta": float(zeta),
+                    "metrics": mean_metrics(seed_metrics),
+                    "selection_seed_metrics": seed_metrics,
+                }
             )
-        structural.append(
-            {
-                "width": int(width),
-                "weight_scale": float(weight_scale),
-                "bias_scale": float(bias_scale),
-                "zeta": float(zeta),
-                "metrics": mean_metrics(seed_metrics),
-                "selection_seed_metrics": seed_metrics,
-            }
-        )
     metric_values = [
         float(item["metrics"][inputs.selection_metric])
         for item in structural
@@ -304,16 +357,12 @@ def _fit_random_feature(
         "weight_scale": chosen["weight_scale"],
         "bias_scale": chosen["bias_scale"],
         "zeta": chosen["zeta"],
-        "members": _random_feature_members(readout, inputs, chosen),
+        "evaluation_seeds": list(readout.evaluation_seeds),
+        "members_materialized": False,
     }
-    require_cpu_tensors(
-        model,
-        boundary="frozen random-feature readout publication",
-        name="model",
-    )
     return FittedReadout(
         validation_values=chosen["metrics"],
-        frozen_model=model,
+        selection_model=model,
         inner_selection={
             "width": chosen["width"],
             "weight_scale": chosen["weight_scale"],

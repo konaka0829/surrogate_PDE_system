@@ -23,7 +23,7 @@ from pol.runtime.device import (
     require_cpu_tensor,
 )
 from pol.runtime.environment import numerical_environment_fingerprint
-from pol.runtime.hashing import stable_object_hash, tensor_sha256
+from pol.runtime.hashing import stable_object_hash
 from pol.runtime.io import write_strict_json
 from pol.study.runner import run_study, verify_study_run
 from pol.validation.binding import verify_binding_proof
@@ -116,7 +116,7 @@ def test_device_resolution_never_consults_cuda_availability(
 def test_environment_fingerprint_separates_policy_from_cuda_build_metadata() -> None:
     fingerprint = numerical_environment_fingerprint()
     assert fingerprint["schema_version"] == "pol-numerical-environment-v2"
-    assert __version__ == "0.2.23"
+    assert __version__ == "0.2.29"
     assert fingerprint["pol_version"] == __version__
     assert {
         key: fingerprint[key] for key in execution_device_policy()
@@ -242,22 +242,169 @@ def test_cpu_workflow_boundary_rejects_non_cpu_tensor_without_copying() -> None:
         )
 
 
-def test_p0_04_cpu_deterministic_archive_regression() -> None:
+def _grf_reference(
+    *,
+    total_samples: int,
+    nx: int,
+    seed: int,
+    gamma: float,
+    tau: float,
+    sigma: float,
+    mean: float,
+    domain_length: float,
+    dtype: torch.dtype,
+    nyquist_scale: float = 2.0**0.5,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    mode_count = nx // 2 + 1
+    modes = torch.arange(mode_count, dtype=dtype)
+    wavenumbers = (2.0 * torch.pi / domain_length) * modes
+    eigenvalues = sigma**2 * (wavenumbers.square() + tau**2).pow(
+        -gamma
+    )
+    real = torch.zeros((total_samples, mode_count), dtype=dtype)
+    imaginary = torch.zeros_like(real)
+    real[:, 0] = mean
+    interior_stop = mode_count
+    if nx % 2 == 0:
+        interior_stop -= 1
+        sign = -1.0 if (nx // 2) % 2 else 1.0
+        noise = torch.randn(
+            total_samples,
+            generator=generator,
+            dtype=dtype,
+        )
+        real[:, -1] = (
+            sign
+            * nyquist_scale
+            * torch.sqrt(eigenvalues[-1])
+            * noise
+        )
+    interior_count = interior_stop - 1
+    if interior_count:
+        signs = torch.where(
+            torch.arange(1, interior_stop) % 2 == 0,
+            1.0,
+            -1.0,
+        ).to(dtype)
+        standard_deviation = torch.sqrt(
+            eigenvalues[1:interior_stop] / 2.0
+        )
+        real[:, 1:interior_stop] = (
+            signs
+            * standard_deviation
+            * torch.randn(
+                (total_samples, interior_count),
+                generator=generator,
+                dtype=dtype,
+            )
+        )
+        imaginary[:, 1:interior_stop] = (
+            signs
+            * standard_deviation
+            * torch.randn(
+                (total_samples, interior_count),
+                generator=generator,
+                dtype=dtype,
+            )
+        )
+    coefficients = torch.complex(real, imaginary)
+    values = torch.fft.irfft(
+        coefficients,
+        n=nx,
+        dim=-1,
+        norm="forward",
+    )
+    return coefficients, values
+
+
+@pytest.mark.parametrize(
+    ("nx", "domain_length", "dtype_name", "dtype", "atol", "rtol"),
+    [
+        (7, 2.0, "float32", torch.float32, 2e-6, 2e-6),
+        (8, 1.0, "float32", torch.float32, 2e-6, 2e-6),
+        (7, 2.0, "float64", torch.float64, 2e-13, 2e-13),
+        (8, 1.0, "float64", torch.float64, 2e-13, 2e-13),
+    ],
+)
+def test_grf_archive_matches_seeded_coefficient_and_fft_reference(
+    nx: int,
+    domain_length: float,
+    dtype_name: str,
+    dtype: torch.dtype,
+    atol: float,
+    rtol: float,
+) -> None:
+    arguments = {
+        "total_samples": 2,
+        "nx": nx,
+        "seed": 2024,
+        "gamma": 2.25,
+        "tau": 4.0,
+        "sigma": 7.0,
+        "mean": 0.5,
+        "domain_length": domain_length,
+    }
     archive = generate_grf_archive(
-        total_samples=2,
-        nx=8,
-        seed=2024,
-        gamma=2.25,
-        tau=4.0,
-        sigma=7.0,
-        mean=0.5,
-        domain_length=1.0,
-        dtype="float64",
+        **arguments,
+        dtype=dtype_name,
         device="cpu",
     )
-    assert tensor_sha256(archive.values) == (
-        "92357619df6ce687a3064f33d592a8bcd53ceb63a31e1b26f67a693f62ad2edf"
+    coefficients, reference_values = _grf_reference(
+        **arguments,
+        dtype=dtype,
     )
-    assert tensor_sha256(archive.fourier) == (
-        "cd734ae54fe54785822b9e8f208fce383f88e1203d852cf4287bc6269ec2d9e5"
+    reference_fourier = torch.fft.rfft(
+        reference_values,
+        dim=-1,
+        norm="forward",
     )
+
+    torch.testing.assert_close(
+        archive.values,
+        reference_values,
+        atol=atol,
+        rtol=rtol,
+    )
+    torch.testing.assert_close(
+        archive.fourier,
+        reference_fourier,
+        atol=atol,
+        rtol=rtol,
+    )
+    torch.testing.assert_close(
+        archive.fourier,
+        coefficients,
+        atol=atol,
+        rtol=rtol,
+    )
+    assert torch.equal(
+        coefficients[:, 0].real,
+        torch.full((2,), 0.5, dtype=dtype),
+    )
+    assert torch.count_nonzero(coefficients[:, 0].imag) == 0
+    if nx % 2 == 0:
+        assert torch.count_nonzero(coefficients[:, -1].imag) == 0
+
+
+def test_grf_reference_detects_mutated_even_grid_nyquist_scaling() -> None:
+    arguments = {
+        "total_samples": 2,
+        "nx": 8,
+        "seed": 2024,
+        "gamma": 2.25,
+        "tau": 4.0,
+        "sigma": 7.0,
+        "mean": 0.5,
+        "domain_length": 1.0,
+        "dtype": torch.float64,
+    }
+    _, expected = _grf_reference(**arguments)
+    _, mutated = _grf_reference(**arguments, nyquist_scale=1.0)
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(
+            expected,
+            mutated,
+            atol=1e-13,
+            rtol=1e-13,
+        )

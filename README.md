@@ -34,8 +34,9 @@ trial and study execution path.
   odd/even and non-unit grids, selects a stable reference-grid suffix against
   exact Fourier-orthogonality values, and separately checks fixed-`n_tar`
   data-space metrics and representation floors.
-- Scientific configuration is strict: unknown keys are rejected with their
-  JSON path.
+- Scientific configuration is strict: unknown keys and non-finite numeric
+  values are rejected at file/override/model boundaries, including nested
+  sweep and override values.
 - Hyperparameter and system selection use the training and validation splits
   only.
 - Numerical-foundation and reference-convergence calibration IDs are bound to
@@ -535,8 +536,9 @@ Production operation is documented in
 [`docs/production_runbook.md`](docs/production_runbook.md). Main execution is
 split into explicit stages, each guarded by `POL_CONFIRM_MAIN=YES`; there is no
 all-in-one main stage. `python3 scripts/plan_main.py` strict-parses and plans
-every main validation, dataset, study, and report without executing or
-publishing one.
+every main validation, dataset, study, digital baseline, and report without
+executing or publishing one. Its workload block requires human capacity
+approval before any main stage.
 
 `events.json` records the durability boundary. In a valid run,
 `freeze_read_back` appears before `first_test_state_solve` and
@@ -569,6 +571,12 @@ are explicitly not labeled as an uncertainty interval.
 `independent_seed_realization` row per frozen evaluation seed, including its
 random-map hash, frozen-member hash, validation metric, selected structural
 hyperparameters and ridge coefficient, and readout norm fields.
+Candidate selection stores only the selected random-feature structure and
+ridge recipe. Evaluation-seed members are fitted from train/validation data
+only after the study-level candidate is selected, and only for that selected
+case/readout. Their validation metrics are audit fields and cannot feed back
+into selection. Random maps and lifted train/validation tensors are reused
+across ridge candidates during the inner search.
 `random_feature_ensemble_metrics.csv` contains one separately labeled
 `prediction_ensemble` row per selected random-feature model; its metric names
 begin with `test_ensemble_`. Ensemble metrics are not copied into the canonical
@@ -602,39 +610,23 @@ the validation, selection, frozen, and test copies. `run_summary.json` records
 the selected direct-decoder diagnostic count, zero-fill count, and any-zero-
 fill flag.
 
-Study configuration through `pol-study-v6` is accepted, and pure plans are
-`pol-study-plan-v3`. Newly written study-run identity, manifest, and summary
-schemas are respectively `v13`, `v14`, and `v14`, with explicit
-`pol-study-result-row-v3` validation/test rows. Older supported completed runs
-remain readable as selection sources. Selection remains `v8`; the frozen-plan
-and frozen-model schemas are `v9`, prediction captures use
-`pol-prediction-capture-v1`, and study dataset-reference remains at `v3`. Heat
-multiplier coefficient rows use
-`pol-heat-multiplier-coefficient-v2`, and case/readout summaries use
-`pol-heat-multiplier-summary-v1`. Validation
-configuration is `pol-validation-v6` for reaction-diffusion (existing v5
-heat/Burgers specs remain parseable for migration); Phase 2-05B advances
-validation identity/certificate to `v12`, adds
-`pol-field-quadrature-check-v1`, retains
-`pol-matched-model1-pipeline-check-v1`, and retains nested
-`pol-burgers-cross-solver-spec-v1` /
-`pol-burgers-cross-solver-check-v2` semantics. The foundation contract is
-`v8`, and the generic primary target-reference contract remains `v4`.
-Dataset configuration remains `pol-dataset-v3`, binding proofs are `v7`,
-and dataset identity/metadata/archive/resolved-spec families remain `v5`.
-The foundation master binding remains at `v3`, initial-condition archives at
-`v4`, and feature-state identity/archive/metadata at `v2`. Earlier validation
-artifacts are rejected rather than silently treated as carrying the
-Phase 2-05B semantics. Long-form primary and self-convergence rows use
-`pol-reference-convergence-row-v3`; the primary CSV is
-`pol-reference-convergence-csv-v3`. Cross-run configurations use
-`pol-report-v1`; identities, manifests, summaries, phase-map tables, and
-baseline tables use their corresponding `pol-*-v1` report schemas. Digital
-FNO configurations use `pol-digital-baseline-v1`; their identity, selection,
-frozen-checkpoint, frozen-plan, summary, and manifest families use
-corresponding `pol-digital-*-v1` schemas. Package version `0.2.23` is recorded
-by numerical-environment schema
-`pol-numerical-environment-v2`.
+The active package version is `0.2.29`. Study configurations through
+`pol-study-v6` remain accepted. Newly written study artifacts use
+`pol-study-plan-v4`, run identity `v15`, selection record `v9`, frozen model
+archive and evaluation plan `v10`, result rows `v3`, and run manifest/summary
+`v16`. The event log uses `pol-study-event-v1`; it records that evaluation
+members were materialized for selected candidates only, before the persisted
+freeze boundary and before test access.
+
+Digital FNO configurations use `pol-digital-baseline-v3`; their run
+identity/manifest/summary are `v4`, selection/checkpoint/frozen-plan artifacts
+are `v3`, and physical-source references and fairness rows are `v3`.
+Validation remains identity/certificate `v12`, dataset binding proofs remain
+`v7`, cross-run reports remain `pol-report-v1`, and prediction captures remain
+`pol-prediction-capture-v1`. The full active-schema catalog and compact
+migration history are in
+[`docs/current_implementation_inventory.md`](docs/current_implementation_inventory.md).
+Historical versions are not active-write claims.
 
 The observation/output budget and input/simulation-resolution study bind both
 their Burgers and reaction-diffusion feature systems and evolution times to
@@ -661,9 +653,14 @@ Smoke profiles are intentionally small and are used for integration checks:
 - `heat_readout_calibration_smoke.json`
 - `surrogate_parameter_time_coordinate_search_smoke.json`
 - `surrogate_parameter_time_landscape_smoke.json`
+- `dynamic_feature_baseline_comparison_smoke.json`
+- `readout_stability_noise_smoke.json`
+- `learning_curve_smoke.json`
+- `random_feature_seed_statistics_smoke.json`
 - `observation_output_budget_smoke.json`
 - `input_simulation_resolution_smoke.json`
 - `digital_baselines/fno1d_smoke.json`
+- `reports/surrogate_operator_summary_smoke.json`
 
 Both Burgers and heat dataset profiles use `validated_reference`. Burgers
 binds to the Burgers convergence certificate; heat binds only to its

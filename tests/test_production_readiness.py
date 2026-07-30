@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,94 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _catalog_profiles(
+    relative_directory: str,
+    *,
+    explicit_main_suffix: bool,
+) -> tuple[set[str], dict[str, set[str]]]:
+    paths = {
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / relative_directory).glob("*.json")
+    }
+    profiles: dict[str, set[str]] = {}
+    for relative in paths:
+        stem = Path(relative).stem
+        if stem.endswith("_smoke"):
+            family = stem.removesuffix("_smoke")
+            profile = "smoke"
+        elif explicit_main_suffix and stem.endswith("_main"):
+            family = stem.removesuffix("_main")
+            profile = "main"
+        else:
+            family = stem
+            profile = "main"
+        profiles.setdefault(family, set()).add(profile)
+    return paths, profiles
+
+
+def _plan_catalog_constant(name: str) -> set[str]:
+    tree = ast.parse(
+        (ROOT / "scripts" / "plan_main.py").read_text(encoding="utf-8")
+    )
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == name
+        ):
+            return set(ast.literal_eval(node.value))
+    raise AssertionError(f"missing plan catalog constant: {name}")
+
+
+def test_checked_in_profile_catalog_matches_docs_and_main_audit() -> None:
+    declarations = {
+        "VALIDATIONS": ("configs/validation", True),
+        "DATASETS": ("configs/datasets", True),
+        "STUDIES": ("studies", False),
+        "DIGITAL_BASELINES": ("digital_baselines", False),
+        "REPORTS": ("reports", False),
+    }
+    inventory = (
+        ROOT / "docs" / "current_implementation_inventory.md"
+    ).read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    orchestrator = (ROOT / "scripts" / "run_main.sh").read_text(
+        encoding="utf-8"
+    )
+
+    for constant, (directory, explicit_main_suffix) in declarations.items():
+        paths, profiles = _catalog_profiles(
+            directory,
+            explicit_main_suffix=explicit_main_suffix,
+        )
+        assert profiles
+        assert all(value == {"main", "smoke"} for value in profiles.values())
+
+        main_paths = {
+            relative
+            for relative in paths
+            if not Path(relative).stem.endswith("_smoke")
+        }
+        assert _plan_catalog_constant(constant) == main_paths
+        assert all(relative in inventory for relative in paths)
+        assert all(family in readme for family in profiles)
+        assert all(relative in orchestrator for relative in main_paths)
+
+
 def test_main_plan_audit_strictly_plans_every_declared_main_spec() -> None:
+    watched = (
+        ROOT / "configs",
+        ROOT / "studies",
+        ROOT / "reports",
+        ROOT / "digital_baselines",
+    )
+    before = {
+        path.relative_to(ROOT): (path.stat().st_size, path.stat().st_mtime_ns)
+        for parent in watched
+        for path in parent.rglob("*")
+        if path.is_file()
+    }
     completed = subprocess.run(
         [sys.executable, "scripts/plan_main.py"],
         cwd=ROOT,
@@ -19,8 +107,15 @@ def test_main_plan_audit_strictly_plans_every_declared_main_spec() -> None:
         capture_output=True,
         text=True,
     )
+    after = {
+        path.relative_to(ROOT): (path.stat().st_size, path.stat().st_mtime_ns)
+        for parent in watched
+        for path in parent.rglob("*")
+        if path.is_file()
+    }
     audit = json.loads(completed.stdout)
-    assert audit["schema_version"] == "pol-production-plan-audit-v2"
+    assert before == after
+    assert audit["schema_version"] == "pol-production-plan-audit-v3"
     assert audit["status"] == "pass"
     assert audit["mode"] == "read_only_plan"
     assert audit["main_execution"] is False
@@ -43,22 +138,40 @@ def test_main_plan_audit_strictly_plans_every_declared_main_spec() -> None:
     )
     studies = {item["name"]: item for item in audit["study_specs"]}
     assert {
-        name: (
-            item["case_count"],
-            item["candidate_upper_bound"],
-            item["random_feature_evaluation_seed_count_per_case"],
-        )
+        name: (item["case_count"], item["candidate_upper_bound"])
         for name, item in studies.items()
     } == {
-        "heat_readout_calibration": (12, 12, 10),
-        "surrogate_parameter_time_coordinate_search": (2, 120, 10),
-        "surrogate_parameter_time_landscape": (3, 75, 10),
-        "dynamic_feature_baseline_comparison": (4, 4, 10),
-        "readout_stability_noise": (1, 1, 10),
-        "learning_curve": (6, 6, 10),
-        "random_feature_seed_statistics": (1, 1, 32),
-        "observation_output_budget": (40, 40, 10),
-        "input_simulation_resolution": (32, 32, 10),
+        "heat_readout_calibration": (12, 12),
+        "surrogate_parameter_time_coordinate_search": (2, 120),
+        "surrogate_parameter_time_landscape": (3, 75),
+        "dynamic_feature_baseline_comparison": (4, None),
+        "readout_stability_noise": (1, None),
+        "learning_curve": (6, None),
+        "random_feature_seed_statistics": (1, None),
+        "observation_output_budget": (40, None),
+        "input_simulation_resolution": (32, None),
+    }
+    landscape = studies["surrogate_parameter_time_landscape"]["workload"]
+    assert landscape["random_feature"][
+        "eager_legacy_total_ridge_fit_count"
+    ] == 41_250
+    assert landscape["random_feature"]["ridge_fit_count"] == 40_500
+    assert landscape["random_feature"][
+        "selected_candidate_evaluation_member_fit_count"
+    ] == 30
+    unresolved = {
+        name
+        for name, item in studies.items()
+        if item["workload"]["status"]
+        == "unresolved_selection_dependency"
+    }
+    assert unresolved == {
+        "dynamic_feature_baseline_comparison",
+        "readout_stability_noise",
+        "learning_curve",
+        "random_feature_seed_statistics",
+        "observation_output_budget",
+        "input_simulation_resolution",
     }
     assert all(item["filesystem_mutation"] is False for item in studies.values())
     report = audit["report_specs"][0]

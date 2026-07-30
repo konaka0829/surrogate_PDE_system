@@ -1,5 +1,5 @@
 {
-  "schema_version": "pol-digital-baseline-v1",
+  "schema_version": "pol-digital-baseline-v3",
   "name": "fno1d_burgers",
   "profile": "main",
   "output_root": "outputs/digital_baselines",
@@ -15,7 +15,7 @@
   "model": {
     "kind": "fno1d",
     "activation": "gelu",
-    "coordinate_channel": "unit_periodic",
+    "coordinate_channel": "none",
     "candidates": [
       {
         "id": "m16_w32_d4",

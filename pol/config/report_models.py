@@ -6,6 +6,10 @@ from typing import Annotated, Literal, Union
 from pydantic import Field, PositiveInt, field_validator, model_validator
 
 from .models import StrictModel
+from .names import (
+    validate_extension_free_filename,
+    validate_safe_path_component,
+)
 
 
 class ReportSourceSpec(StrictModel):
@@ -15,14 +19,7 @@ class ReportSourceSpec(StrictModel):
     @field_validator("id")
     @classmethod
     def _safe_id(cls, value: str) -> str:
-        if (
-            not value
-            or Path(value).name != value
-            or value.startswith(".")
-            or any(character.isspace() for character in value)
-        ):
-            raise ValueError("report source id must be a safe nonempty name")
-        return value
+        return validate_safe_path_component(value, field="report source id")
 
 
 class PhaseDiagramReportSpec(StrictModel):
@@ -73,7 +70,10 @@ class PhaseDiagramReportSpec(StrictModel):
             raise ValueError(
                 "selected-cell marking belongs to a validation phase diagram"
             )
-        _safe_filename(self.filename)
+        validate_extension_free_filename(
+            self.filename,
+            field="cross-run reporter filename",
+        )
         if not self.formats or len(set(self.formats)) != len(self.formats):
             raise ValueError("phase diagram formats must be nonempty and unique")
         return self
@@ -88,9 +88,10 @@ class BaselineTableRowSpec(StrictModel):
     @field_validator("id")
     @classmethod
     def _row_id(cls, value: str) -> str:
-        if not value or Path(value).name != value or value.startswith("."):
-            raise ValueError("baseline row id must be a safe nonempty name")
-        return value
+        return validate_safe_path_component(
+            value,
+            field="baseline row id",
+        )
 
 
 class BaselineSummaryTableSpec(StrictModel):
@@ -120,7 +121,10 @@ class BaselineSummaryTableSpec(StrictModel):
 
     @model_validator(mode="after")
     def _baseline_table(self) -> "BaselineSummaryTableSpec":
-        _safe_filename(self.filename)
+        validate_extension_free_filename(
+            self.filename,
+            field="cross-run reporter filename",
+        )
         if not self.rows:
             raise ValueError("baseline table rows must not be empty")
         row_ids = [row.id for row in self.rows]
@@ -152,9 +156,17 @@ class ReportSpec(StrictModel):
     sources: tuple[ReportSourceSpec, ...]
     reporters: tuple[ReportItemSpec, ...]
 
+    @field_validator("name", "profile")
+    @classmethod
+    def _safe_output_components(cls, value: str, info: object) -> str:
+        field_name = str(getattr(info, "field_name", "path component"))
+        return validate_safe_path_component(
+            value,
+            field=f"report {field_name}",
+        )
+
     @model_validator(mode="after")
     def _report(self) -> "ReportSpec":
-        _safe_filename(self.name)
         if len(self.sources) < 2:
             raise ValueError(
                 "a cross-run report requires at least two source runs"
@@ -173,20 +185,6 @@ class ReportSpec(StrictModel):
         if len(set(filenames)) != len(filenames):
             raise ValueError("reporter filenames must be unique")
         return self
-
-
-def _safe_filename(value: str) -> None:
-    if (
-        not value
-        or Path(value).name != value
-        or value.startswith(".")
-        or Path(value).suffix
-    ):
-        raise ValueError(
-            "report filename must be a safe extension-free basename"
-        )
-
-
 __all__ = [
     "BaselineSummaryTableSpec",
     "BaselineTableRowSpec",

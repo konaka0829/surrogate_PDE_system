@@ -28,7 +28,10 @@ from pol.runtime.io import (
     write_strict_json,
 )
 from pol.study.selection_source import (
+    FrozenSourceBoundary,
     VerifiedCompletedRun,
+    read_frozen_source_boundary,
+    resolve_preflight_completed_run,
     resolve_verified_completed_run,
 )
 
@@ -52,14 +55,21 @@ from .protocol import (
     FNO1dCandidateSpec,
     semantic_digital_baseline_spec,
 )
+from .parameter_accounting import (
+    PARAMETER_COUNT_DEFINITION_VERSION,
+    PARAMETER_COUNT_SCOPE,
+    PARAMETER_SCALAR_POLICY,
+    fno_parameter_counts,
+    physical_parameter_counts,
+)
 
 
-DIGITAL_IDENTITY_SCHEMA = "pol-digital-baseline-identity-v1"
-DIGITAL_MANIFEST_SCHEMA = "pol-digital-baseline-run-manifest-v1"
-DIGITAL_SELECTION_SCHEMA = "pol-digital-selection-record-v1"
-DIGITAL_CHECKPOINT_SCHEMA = "pol-digital-frozen-checkpoints-v1"
-DIGITAL_PLAN_SCHEMA = "pol-digital-frozen-evaluation-plan-v1"
-DIGITAL_SUMMARY_SCHEMA = "pol-digital-baseline-summary-v1"
+DIGITAL_IDENTITY_SCHEMA = "pol-digital-baseline-identity-v4"
+DIGITAL_MANIFEST_SCHEMA = "pol-digital-baseline-run-manifest-v4"
+DIGITAL_SELECTION_SCHEMA = "pol-digital-selection-record-v3"
+DIGITAL_CHECKPOINT_SCHEMA = "pol-digital-frozen-checkpoints-v3"
+DIGITAL_PLAN_SCHEMA = "pol-digital-frozen-evaluation-plan-v3"
+DIGITAL_SUMMARY_SCHEMA = "pol-digital-baseline-summary-v4"
 
 _RUN_FILES = (
     "dataset_reference.json",
@@ -89,8 +99,24 @@ class DigitalBaselineRun:
 
 
 @dataclass(frozen=True)
-class _PhysicalSource:
+class _PhysicalSourcePreflight:
     spec: Any
+    completed: VerifiedCompletedRun
+    boundary: FrozenSourceBoundary
+    validation_rows: tuple[dict[str, str], ...]
+    coordinates: tuple[dict[str, str], ...]
+    reference: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _PhysicalTestRows:
+    rows: tuple[dict[str, str], ...]
+    file_sha256: str
+
+
+@dataclass(frozen=True)
+class _PhysicalSourceComparison:
+    preflight: _PhysicalSourcePreflight
     completed: VerifiedCompletedRun
     test_rows: tuple[dict[str, str], ...]
     validation_rows: tuple[dict[str, str], ...]
@@ -104,56 +130,254 @@ def _read_csv(path: Path) -> tuple[dict[str, str], ...]:
         return tuple(dict(row) for row in csv.DictReader(handle))
 
 
-def _physical_source(
+def _read_physical_test_rows(path: Path) -> tuple[dict[str, str], ...]:
+    """The single auditable parser for physical-source test metrics."""
+    return _read_csv(path)
+
+
+def _physical_coordinates(
+    spec: DigitalBaselineSpec,
+    *,
+    boundary: FrozenSourceBoundary,
+    validation_rows: tuple[dict[str, str], ...],
+) -> tuple[dict[str, str], ...]:
+    cases = boundary.selection.get("cases")
+    plan_cases = boundary.plan.get("cases")
+    models = boundary.archive.get("models")
+    if (
+        not isinstance(cases, Mapping)
+        or not isinstance(plan_cases, Mapping)
+        or not isinstance(models, Mapping)
+    ):
+        raise ValueError("physical source has an invalid frozen selection boundary")
+    coordinates: list[dict[str, str]] = []
+    for declared in spec.physical_comparison.rows:
+        case_matches = [
+            (str(case_id), case)
+            for case_id, case in cases.items()
+            if isinstance(case, Mapping)
+            and case.get("variant_id") == declared.variant_id
+        ]
+        if len(case_matches) != 1:
+            raise ValueError(
+                "predeclared physical comparison coordinate must match exactly "
+                f"one selected case: {declared.variant_id}/{declared.readout_id}"
+            )
+        case_id, case = case_matches[0]
+        selected = case.get("selected_by_readout")
+        candidate_id = (
+            selected.get(declared.readout_id)
+            if isinstance(selected, Mapping)
+            else None
+        )
+        if not isinstance(candidate_id, str):
+            raise ValueError(
+                "predeclared physical comparison readout was not selected: "
+                f"{declared.variant_id}/{declared.readout_id}"
+            )
+        plan_case = plan_cases.get(case_id)
+        if (
+            not isinstance(plan_case, Mapping)
+            or plan_case.get("selected_by_readout") != selected
+        ):
+            raise ValueError(
+                "physical comparison coordinate disagrees with frozen plan"
+            )
+        frozen_matches = [
+            (str(model_key), model)
+            for model_key, model in models.items()
+            if isinstance(model, Mapping)
+            and model.get("case_id") == case_id
+            and model.get("variant_id") == declared.variant_id
+            and model.get("readout_id") == declared.readout_id
+            and model.get("candidate_id") == candidate_id
+        ]
+        if len(frozen_matches) != 1:
+            raise ValueError(
+                "physical comparison coordinate has no unique frozen model"
+            )
+        validation_matches = [
+            row
+            for row in validation_rows
+            if row.get("case_id") == case_id
+            and row.get("candidate_id") == candidate_id
+            and row.get("readout_id") == declared.readout_id
+        ]
+        if len(validation_matches) != 1:
+            raise ValueError(
+                "physical comparison coordinate has no unique validation row"
+            )
+        coordinates.append(
+            {
+                "row_id": declared.id,
+                "variant_id": declared.variant_id,
+                "case_id": case_id,
+                "readout_id": declared.readout_id,
+                "candidate_id": candidate_id,
+                "frozen_model_key": frozen_matches[0][0],
+            }
+        )
+    return tuple(coordinates)
+
+
+def _physical_source_preflight(
     spec: DigitalBaselineSpec,
     *,
     repo_root: Path,
-) -> _PhysicalSource:
-    """Resolve and verify the exact physical source before any training."""
+) -> _PhysicalSourcePreflight:
+    """Verify source bytes and non-test frozen state before digital training."""
     source_spec = load_study_spec(
         spec.physical_comparison.source_study_spec,
         repo_root=repo_root,
     )
     if source_spec.profile != spec.profile:
         raise ValueError("digital and physical comparison profiles must match")
-    completed = resolve_verified_completed_run(source_spec, repo_root=repo_root)
-    test_rows = _read_csv(completed.path / "test_metrics.csv")
+    completed = resolve_preflight_completed_run(
+        source_spec,
+        repo_root=repo_root,
+    )
+    boundary = read_frozen_source_boundary(completed)
     validation_rows = _read_csv(completed.path / "validation_trials.csv")
-    for declared in spec.physical_comparison.rows:
-        matches = [
-            row
-            for row in test_rows
-            if row.get("variant_id") == declared.variant_id
-            and row.get("readout_id") == declared.readout_id
-        ]
-        if len(matches) != 1:
-            raise ValueError(
-                "predeclared physical comparison coordinate must match exactly "
-                f"one primary test row: {declared.variant_id}/{declared.readout_id}"
-            )
+    coordinates = _physical_coordinates(
+        spec,
+        boundary=boundary,
+        validation_rows=validation_rows,
+    )
     reference = {
-        "schema_version": "pol-digital-physical-source-reference-v1",
+        "schema_version": "pol-digital-physical-source-preflight-v2",
         "study": source_spec.name,
         "profile": source_spec.profile,
         "run_hash": completed.run_hash,
         "scientific_identity_hash": completed.scientific_identity_hash,
-        "manifest_sha256": file_sha256(completed.path / "manifest.json"),
+        "preflight_manifest_sha256": file_sha256(
+            completed.path / "manifest.json"
+        ),
+        "preflight_manifest_records_hash": stable_object_hash(
+            json.loads(
+                (completed.path / "manifest.json").read_text(encoding="utf-8")
+            )["files"]
+        ),
         "selection_record_sha256": file_sha256(
             completed.path / "selection_record.json"
         ),
+        "selection_record_hash": boundary.selection_hash,
         "frozen_evaluation_plan_sha256": file_sha256(
             completed.path / "frozen_evaluation_plan.json"
         ),
+        "frozen_plan_hash": boundary.plan_hash,
+        "frozen_model_archive_sha256": boundary.archive_hash,
+        "validation_trials_sha256": file_sha256(
+            completed.path / "validation_trials.csv"
+        ),
         "dataset_artifact_id": completed.dataset.artifact_id,
         "dataset_split_hash": completed.dataset.split_hash,
-        "source_verification": "complete_before_digital_training",
+        "validated_coordinates": list(coordinates),
+        "source_verification": (
+            "exact_manifest_bytes_and_non_test_frozen_boundary_before_training"
+        ),
+        "test_metrics_parsed": False,
         "source_filesystem_mutation": False,
     }
-    return _PhysicalSource(
+    return _PhysicalSourcePreflight(
         spec=source_spec,
         completed=completed,
-        test_rows=test_rows,
+        boundary=boundary,
         validation_rows=validation_rows,
+        coordinates=coordinates,
+        reference=reference,
+    )
+
+
+def _physical_test_rows_after_freeze(
+    physical: _PhysicalSourcePreflight,
+) -> _PhysicalTestRows:
+    current_manifest_hash = file_sha256(
+        physical.completed.path / "manifest.json"
+    )
+    if (
+        current_manifest_hash
+        != physical.reference["preflight_manifest_sha256"]
+    ):
+        raise ValueError(
+            "physical source manifest changed after digital preflight"
+        )
+    path = physical.completed.path / "test_metrics.csv"
+    test_rows = _read_physical_test_rows(path)
+    for coordinate in physical.coordinates:
+        matches = [
+            row
+            for row in test_rows
+            if row.get("variant_id") == coordinate["variant_id"]
+            and row.get("case_id") == coordinate["case_id"]
+            and row.get("candidate_id") == coordinate["candidate_id"]
+            and row.get("readout_id") == coordinate["readout_id"]
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "frozen physical comparison coordinate must match exactly one "
+                "primary test row after digital freeze"
+            )
+    return _PhysicalTestRows(
+        rows=test_rows,
+        file_sha256=file_sha256(path),
+    )
+
+
+def _fully_verified_physical_source(
+    physical: _PhysicalSourcePreflight,
+    test_data: _PhysicalTestRows,
+    *,
+    repo_root: Path,
+    digital_plan_hash: str,
+) -> _PhysicalSourceComparison:
+    completed = resolve_verified_completed_run(
+        physical.spec,
+        repo_root=repo_root,
+    )
+    if (
+        completed.path != physical.completed.path
+        or completed.run_hash != physical.completed.run_hash
+        or completed.identity != physical.completed.identity
+    ):
+        raise ValueError("physical source identity changed after digital freeze")
+    full_manifest_hash = file_sha256(completed.path / "manifest.json")
+    preflight_manifest_hash = physical.reference[
+        "preflight_manifest_sha256"
+    ]
+    if full_manifest_hash != preflight_manifest_hash:
+        raise ValueError(
+            "physical source manifest changed before full verification"
+        )
+    if file_sha256(completed.path / "test_metrics.csv") != test_data.file_sha256:
+        raise ValueError(
+            "physical source test metrics changed during digital evaluation"
+        )
+    postfreeze = {
+        "test_metrics_sha256": test_data.file_sha256,
+        "test_parse_event": "physical_source_test_rows_parsed",
+        "test_metrics_parsed_after_digital_plan_hash": digital_plan_hash,
+        "fully_verified_source_manifest_sha256": full_manifest_hash,
+        "source_manifest_unchanged": True,
+        "full_source_verification": "complete_before_fairness_publication",
+        "full_verification_evidence_hash": stable_object_hash(
+            {
+                "run_hash": completed.run_hash,
+                "manifest_sha256": full_manifest_hash,
+                "test_metrics_sha256": test_data.file_sha256,
+                "digital_plan_hash": digital_plan_hash,
+            }
+        ),
+    }
+    reference = {
+        "schema_version": "pol-digital-physical-source-reference-v3",
+        "preflight": dict(physical.reference),
+        "postfreeze": postfreeze,
+    }
+    return _PhysicalSourceComparison(
+        preflight=physical,
+        completed=completed,
+        test_rows=test_data.rows,
+        validation_rows=physical.validation_rows,
         reference=reference,
     )
 
@@ -183,7 +407,7 @@ def _identity(
     spec: DigitalBaselineSpec,
     *,
     dataset: ReferenceDataset,
-    physical: _PhysicalSource,
+    physical: _PhysicalSourcePreflight,
 ) -> dict[str, Any]:
     return {
         "schema_version": DIGITAL_IDENTITY_SCHEMA,
@@ -216,6 +440,10 @@ def _normalization_hash(normalization: Mapping[str, object]) -> str:
     )
 
 
+def _lifting_input_channels(spec: DigitalBaselineSpec) -> int:
+    return 1 if spec.model.coordinate_channel == "none" else 3
+
+
 def _candidate(
     spec: DigitalBaselineSpec,
     candidate_id: str,
@@ -241,6 +469,9 @@ def _selection_record(
         "dataset_split_hash": dataset.split_hash,
         "n_tar": int(spec.input.n_tar),
         "q": int(spec.output.q),
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": _lifting_input_channels(spec),
+        "domain_length": float(dataset.domain_length),
         "selection_metric": spec.training.checkpoint_metric,
         "candidate_tie_break": spec.training.candidate_tie_break,
         "candidate_tie_tolerance": float(
@@ -272,6 +503,7 @@ def _checkpoint_archive(
     selected_candidate_id: str,
     outcomes: list[TrainingOutcome],
     normalization: Mapping[str, object],
+    domain_length: float,
 ) -> dict[str, Any]:
     models = []
     for outcome in outcomes:
@@ -283,6 +515,8 @@ def _checkpoint_archive(
                 "best_epoch": int(outcome.best_epoch),
                 "validation_metrics": dict(outcome.best_validation_metrics),
                 "parameter_count": int(outcome.parameter_count),
+                "coordinate_channel": spec.model.coordinate_channel,
+                "lifting_input_channels": _lifting_input_channels(spec),
                 "state_dict_hash": outcome.state_dict_hash,
                 "state_dict": outcome.state_dict,
             }
@@ -293,6 +527,9 @@ def _checkpoint_archive(
         "selection_record_hash": selection_hash,
         "selected_candidate_id": selected_candidate_id,
         "evaluation_seeds": list(spec.training.evaluation_seeds),
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": _lifting_input_channels(spec),
+        "domain_length": float(domain_length),
         "normalization_hash": _normalization_hash(normalization),
         "normalization": dict(normalization),
         "models": models,
@@ -309,7 +546,7 @@ def _frozen_plan(
     spec: DigitalBaselineSpec,
     *,
     dataset: ReferenceDataset,
-    physical: _PhysicalSource,
+    physical: _PhysicalSourcePreflight,
     selection_hash: str,
     selected_candidate_id: str,
     archive_sha256: str,
@@ -332,6 +569,9 @@ def _frozen_plan(
         "n_ref": int(dataset.reference_nx),
         "n_tar": int(spec.input.n_tar),
         "q": int(spec.output.q),
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": _lifting_input_channels(spec),
+        "domain_length": float(dataset.domain_length),
         "test_sample_count": int(dataset.test_ids.numel()),
         "primary_result": spec.reporting.primary_result,
         "confidence_level": float(spec.reporting.confidence_level),
@@ -340,6 +580,13 @@ def _frozen_plan(
         ),
         "prediction_ensemble": spec.reporting.prediction_ensemble,
         "physical_source_run_hash": physical.completed.run_hash,
+        "physical_source_preflight_manifest_sha256": physical.reference[
+            "preflight_manifest_sha256"
+        ],
+        "physical_source_selection_record_hash": (
+            physical.boundary.selection_hash
+        ),
+        "physical_source_frozen_plan_hash": physical.boundary.plan_hash,
         "test_data_used": False,
     }
     return {
@@ -351,6 +598,8 @@ def _frozen_plan(
 def _read_frozen_boundary(
     root: Path,
     spec: DigitalBaselineSpec,
+    *,
+    domain_length: float,
 ) -> tuple[dict[str, Any], str, dict[str, Any], dict[str, Any]]:
     selection = json.loads(
         (root / "selection_record.json").read_text(encoding="utf-8")
@@ -359,6 +608,30 @@ def _read_frozen_boundary(
         raise ValueError("unsupported digital selection record")
     if selection.get("test_data_used") is not False:
         raise ValueError("digital selection record is not test isolated")
+    expected_channels = _lifting_input_channels(spec)
+    if (
+        selection.get("coordinate_channel")
+        != spec.model.coordinate_channel
+        or selection.get("lifting_input_channels") != expected_channels
+        or selection.get("domain_length") != float(domain_length)
+    ):
+        raise ValueError(
+            "digital selection coordinate architecture mismatch"
+        )
+    candidate_summaries = selection.get("candidate_summaries")
+    if (
+        not isinstance(candidate_summaries, list)
+        or any(
+            not isinstance(summary, Mapping)
+            or summary.get("coordinate_channel")
+            != spec.model.coordinate_channel
+            or summary.get("lifting_input_channels") != expected_channels
+            for summary in candidate_summaries
+        )
+    ):
+        raise ValueError(
+            "digital candidate coordinate architecture mismatch"
+        )
     selection_hash = stable_object_hash(selection)
     if selection.get("selection_training_history_sha256") != file_sha256(
         root / "selection_training_history.csv"
@@ -382,6 +655,12 @@ def _read_frozen_boundary(
         or plan.get("test_data_used") is not False
     ):
         raise ValueError("digital frozen plan does not match selection")
+    if (
+        plan.get("coordinate_channel") != spec.model.coordinate_channel
+        or plan.get("lifting_input_channels") != expected_channels
+        or plan.get("domain_length") != float(domain_length)
+    ):
+        raise ValueError("digital frozen plan coordinate architecture mismatch")
 
     archive_path = root / "frozen_checkpoints.pt"
     if file_sha256(archive_path) != plan.get("frozen_checkpoints_sha256"):
@@ -407,6 +686,14 @@ def _read_frozen_boundary(
     )
     if archive.get("selection_record_hash") != selection_hash:
         raise ValueError("digital checkpoint selection hash mismatch")
+    if (
+        archive.get("coordinate_channel") != spec.model.coordinate_channel
+        or archive.get("lifting_input_channels") != expected_channels
+        or archive.get("domain_length") != float(domain_length)
+    ):
+        raise ValueError(
+            "digital checkpoint coordinate architecture mismatch"
+        )
     if archive.get("selected_candidate_id") != selection.get(
         "selected_candidate_id"
     ):
@@ -425,8 +712,32 @@ def _read_frozen_boundary(
         state = model.get("state_dict")
         if not isinstance(state, dict):
             raise ValueError("digital frozen model has no state_dict")
+        if (
+            model.get("coordinate_channel") != spec.model.coordinate_channel
+            or model.get("lifting_input_channels") != expected_channels
+        ):
+            raise ValueError(
+                "digital frozen model coordinate architecture mismatch"
+            )
         if state_dict_content_hash(state) != model.get("state_dict_hash"):
             raise ValueError("frozen FNO checkpoint content hash mismatch")
+        lifting_weight = state.get("lifting.weight")
+        if (
+            not isinstance(lifting_weight, torch.Tensor)
+            or lifting_weight.ndim != 2
+            or int(lifting_weight.shape[1]) != expected_channels
+        ):
+            raise ValueError("FNO lifting input-channel mismatch")
+        candidate = _candidate(spec, str(model.get("candidate_id")))
+        load_fno_checkpoint(
+            candidate,
+            n_tar=int(spec.input.n_tar),
+            dtype=lifting_weight.dtype,
+            state_dict=state,
+            expected_hash=str(model["state_dict_hash"]),
+            coordinate_channel=spec.model.coordinate_channel,
+            domain_length=domain_length,
+        )
         seeds.append(int(model["seed"]))
     if seeds != list(spec.training.evaluation_seeds):
         raise ValueError("digital frozen evaluation seeds mismatch")
@@ -463,6 +774,8 @@ def _select_candidate(
             "modes": int(candidate.modes),
             "width": int(candidate.width),
             "depth": int(candidate.depth),
+            "coordinate_channel": spec.model.coordinate_channel,
+            "lifting_input_channels": _lifting_input_channels(spec),
             "parameter_count": int(members[0].parameter_count),
             "selection_seed_count": len(members),
             "selection_seed_values": [
@@ -524,6 +837,8 @@ def _test_tables(
             dtype=test_view.inputs.dtype,
             state_dict=model_record["state_dict"],
             expected_hash=str(model_record["state_dict_hash"]),
+            coordinate_channel=spec.model.coordinate_channel,
+            domain_length=dataset.domain_length,
         )
         prediction = predict_coefficients(
             model,
@@ -545,7 +860,7 @@ def _test_tables(
         seed_metric_values.append({**metrics, **floor})
         seed_rows.append(
             {
-                "schema_version": "pol-digital-test-seed-row-v1",
+                "schema_version": "pol-digital-test-seed-row-v2",
                 "test_result_kind": "independent_training_seed_realization",
                 "model_kind": "fno1d",
                 "candidate_id": candidate.id,
@@ -553,6 +868,8 @@ def _test_tables(
                 "checkpoint_epoch": int(model_record["best_epoch"]),
                 "checkpoint_hash": model_record["state_dict_hash"],
                 "parameter_count": int(model_record["parameter_count"]),
+                "coordinate_channel": spec.model.coordinate_channel,
+                "lifting_input_channels": _lifting_input_channels(spec),
                 "n_ref": int(dataset.reference_nx),
                 "n_tar": int(spec.input.n_tar),
                 "q": int(spec.output.q),
@@ -562,11 +879,13 @@ def _test_tables(
         )
     statistics = summarize_seed_metrics(seed_metric_values)
     primary = {
-        "schema_version": "pol-digital-test-summary-row-v1",
+        "schema_version": "pol-digital-test-summary-row-v2",
         "test_result_kind": "independent_training_seed_metric_summary",
         "model_kind": "fno1d",
         "candidate_id": candidate.id,
         "parameter_count": int(archive["models"][0]["parameter_count"]),
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": _lifting_input_channels(spec),
         "n_ref": int(dataset.reference_nx),
         "n_tar": int(spec.input.n_tar),
         "q": int(spec.output.q),
@@ -587,10 +906,12 @@ def _test_tables(
         ).items()
     }
     ensemble = {
-        "schema_version": "pol-digital-test-ensemble-row-v1",
+        "schema_version": "pol-digital-test-ensemble-row-v2",
         "test_result_kind": "prediction_ensemble",
         "model_kind": "fno1d",
         "candidate_id": candidate.id,
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": _lifting_input_channels(spec),
         "ensemble_member_count": len(seed_rows),
         "ensemble_member_seeds_hash": stable_object_hash(
             list(spec.training.evaluation_seeds)
@@ -620,27 +941,42 @@ def _float(row: Mapping[str, str], key: str) -> float:
     return value
 
 
-def _physical_parameter_count(row: Mapping[str, str]) -> int:
-    kind = row.get("readout_kind")
-    q = int(row["q"])
-    J = int(row["J"])
-    if kind == "direct_fourier_decoder":
-        return 0
-    if kind == "affine_ridge":
-        return q * (J + 1)
-    if kind == "random_feature_ridge":
-        width = int(row["selected_random_feature_width"])
-        return width * (J + 1) + q * (width + 1)
-    raise ValueError(f"unknown physical readout kind: {kind}")
+def _physical_count_fields(
+    physical: _PhysicalSourceComparison,
+    coordinate: Mapping[str, str],
+    row: Mapping[str, str],
+) -> dict[str, Any]:
+    models = physical.preflight.boundary.archive.get("models")
+    model_key = coordinate["frozen_model_key"]
+    entry = models.get(model_key) if isinstance(models, Mapping) else None
+    model = entry.get("model") if isinstance(entry, Mapping) else None
+    if not isinstance(model, Mapping):
+        raise ValueError("physical fairness coordinate has no frozen model")
+    if row.get("readout_kind") != model.get("kind"):
+        raise ValueError(
+            "physical fairness row readout kind disagrees with frozen model"
+        )
+    if model.get("kind") == "random_feature_ridge" and int(
+        row.get("selected_random_feature_width", -1)
+    ) != int(model.get("width", -2)):
+        raise ValueError(
+            "physical fairness row width disagrees with frozen model"
+        )
+    return physical_parameter_counts(
+        model,
+        observation_count=int(row["J"]),
+        q=int(row["q"]),
+    )
 
 
 def _fairness_rows(
     spec: DigitalBaselineSpec,
     *,
     dataset: ReferenceDataset,
-    physical: _PhysicalSource,
+    physical: _PhysicalSourceComparison,
     selection: Mapping[str, Any],
     primary: Mapping[str, Any],
+    digital_counts: Mapping[str, Any],
     compute: Mapping[str, Any],
     run_id: str,
 ) -> list[dict[str, Any]]:
@@ -652,7 +988,8 @@ def _fairness_rows(
         "q": int(spec.output.q),
         "input_dimension": int(spec.input.n_tar),
         "output_dimension": int(spec.output.q),
-        "parameter_count_definition": "stored_real_scalar_model_parameters",
+        "digital_coordinate_channel": None,
+        "digital_lifting_input_channels": None,
         "energy_measurement_status": "not_measured",
         "energy_comparison_allowed": False,
         "wall_clock_comparison_allowed": False,
@@ -664,6 +1001,11 @@ def _fairness_rows(
     }
     rows: list[dict[str, Any]] = []
     for declared in spec.physical_comparison.rows:
+        coordinate = next(
+            coordinate
+            for coordinate in physical.preflight.coordinates
+            if coordinate["row_id"] == declared.id
+        )
         test_matches = [
             row
             for row in physical.test_rows
@@ -693,7 +1035,7 @@ def _fairness_rows(
         seed_count = int(test_row.get("test_seed_count") or 1)
         rows.append(
             {
-                "schema_version": "pol-digital-fairness-row-v1",
+                "schema_version": "pol-digital-fairness-row-v3",
                 "row_id": declared.id,
                 "label": declared.label,
                 "model_family": "physical_feature_readout",
@@ -709,7 +1051,11 @@ def _fairness_rows(
                     "feature_system_condition_hash"
                 ],
                 **common,
-                "parameter_count": _physical_parameter_count(test_row),
+                **_physical_count_fields(
+                    physical,
+                    coordinate,
+                    test_row,
+                ),
                 "training_compute_metadata_status": (
                     "not_recorded_under_common_digital_training_protocol"
                 ),
@@ -781,7 +1127,7 @@ def _fairness_rows(
     )
     rows.append(
         {
-            "schema_version": "pol-digital-fairness-row-v1",
+            "schema_version": "pol-digital-fairness-row-v3",
             "row_id": "fno1d",
             "label": "FNO1d",
             "model_family": "digital_neural_operator",
@@ -798,10 +1144,16 @@ def _fairness_rows(
                     "modes": selected["modes"],
                     "width": selected["width"],
                     "depth": selected["depth"],
+                    "coordinate_channel": selected["coordinate_channel"],
+                    "lifting_input_channels": selected[
+                        "lifting_input_channels"
+                    ],
                 }
             ),
             **common,
-            "parameter_count": int(primary["parameter_count"]),
+            "digital_coordinate_channel": spec.model.coordinate_channel,
+            "digital_lifting_input_channels": _lifting_input_channels(spec),
+            **dict(digital_counts),
             "training_compute_metadata_status": "measured_current_cpu_process",
             "training_wall_time_seconds": compute["total_training_wall_time_seconds"],
             "training_process_time_seconds": compute[
@@ -864,13 +1216,23 @@ def _build_run(
     spec: DigitalBaselineSpec,
     *,
     dataset: ReferenceDataset,
-    physical: _PhysicalSource,
+    physical: _PhysicalSourcePreflight,
     identity: Mapping[str, Any],
+    repo_root: Path,
 ) -> None:
+    source_manifest_hash = physical.reference[
+        "preflight_manifest_sha256"
+    ]
+    source_selection_hash = physical.boundary.selection_hash
+    source_plan_hash = physical.boundary.plan_hash
     events: list[dict[str, Any]] = [
         {
-            "event": "physical_source_verified",
+            "event": "physical_source_preflight_verified",
             "source_run_hash": physical.completed.run_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
+            "source_test_metrics_parsed": False,
         }
     ]
     write_strict_json(
@@ -881,11 +1243,6 @@ def _build_run(
         staging / "dataset_reference.json",
         _dataset_reference(dataset),
     )
-    write_strict_json(
-        staging / "physical_source_reference.json",
-        physical.reference,
-    )
-
     selection_views = build_selection_views(
         dataset,
         n_tar=int(spec.input.n_tar),
@@ -908,6 +1265,7 @@ def _build_run(
                     validation_view=selection_views.validation,
                     normalization=normalization,
                     domain_length=dataset.domain_length,
+                    coordinate_channel=spec.model.coordinate_channel,
                 )
             )
     selection_history = _history_rows(selection_outcomes)
@@ -939,6 +1297,9 @@ def _build_run(
         {
             "event": "selection_complete",
             "selection_record_hash": selection_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
         }
     )
 
@@ -953,6 +1314,7 @@ def _build_run(
             validation_view=selection_views.validation,
             normalization=normalization,
             domain_length=dataset.domain_length,
+            coordinate_channel=spec.model.coordinate_channel,
         )
         for seed in spec.training.evaluation_seeds
     ]
@@ -967,6 +1329,7 @@ def _build_run(
         selected_candidate_id=selected_candidate_id,
         outcomes=evaluation_outcomes,
         normalization=normalization,
+        domain_length=dataset.domain_length,
     )
     atomic_torch_save(staging / "frozen_checkpoints.pt", archive)
     archive_sha256 = file_sha256(staging / "frozen_checkpoints.pt")
@@ -985,16 +1348,27 @@ def _build_run(
             "event": "freeze_written",
             "selection_record_hash": selection_hash,
             "plan_content_hash": plan["plan_content_hash"],
+            "source_manifest_sha256": source_manifest_hash,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
         }
     )
     persisted_selection, persisted_selection_hash, persisted_plan, loaded_archive = (
-        _read_frozen_boundary(staging, spec)
+        _read_frozen_boundary(
+            staging,
+            spec,
+            domain_length=dataset.domain_length,
+        )
     )
+    digital_counts = fno_parameter_counts(loaded_archive)
     events.append(
         {
             "event": "freeze_read_back",
             "selection_record_hash": persisted_selection_hash,
             "plan_content_hash": persisted_plan["plan_content_hash"],
+            "source_manifest_sha256": source_manifest_hash,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
         }
     )
 
@@ -1002,6 +1376,10 @@ def _build_run(
         {
             "event": "first_test_tensor_request",
             "plan_content_hash": persisted_plan["plan_content_hash"],
+            "selection_record_hash": persisted_selection_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
         }
     )
     test_view = build_test_view(
@@ -1009,16 +1387,39 @@ def _build_run(
         n_tar=int(spec.input.n_tar),
         q=int(spec.output.q),
     )
+    physical_test_data = _physical_test_rows_after_freeze(physical)
+    events.append(
+        {
+            "event": "physical_source_test_rows_parsed",
+            "plan_content_hash": persisted_plan["plan_content_hash"],
+            "selection_record_hash": persisted_selection_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_test_metrics_sha256": physical_test_data.file_sha256,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
+        }
+    )
     seed_rows, primary, ensemble, _ = _test_tables(
         spec,
         dataset=dataset,
         test_view=test_view,
         archive=loaded_archive,
     )
+    if int(primary["parameter_count"]) != int(
+        digital_counts["total_stored_parameter_count"]
+    ):
+        raise ValueError(
+            "digital primary parameter count disagrees with frozen state_dict"
+        )
     events.append(
         {
             "event": "first_test_metric",
             "plan_content_hash": persisted_plan["plan_content_hash"],
+            "selection_record_hash": persisted_selection_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_test_metrics_sha256": physical_test_data.file_sha256,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
         }
     )
     write_csv(
@@ -1036,7 +1437,6 @@ def _build_run(
         [ensemble],
         fieldnames=list(ensemble),
     )
-
     all_outcomes = [*selection_outcomes, *evaluation_outcomes]
     optimizer_steps = (
         len(all_outcomes)
@@ -1049,13 +1449,29 @@ def _build_run(
         "schema_version": "pol-digital-training-compute-v1",
         **execution_device_policy(),
         "optimizer": spec.training.optimizer.model_dump(mode="json"),
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": _lifting_input_channels(spec),
+        "domain_length": float(dataset.domain_length),
         "candidate_count": len(spec.model.candidates),
         "selection_training_model_count": len(selection_outcomes),
         "evaluation_training_model_count": len(evaluation_outcomes),
         "epochs_per_model": int(spec.training.epochs),
         "batch_size": int(spec.training.batch_size),
         "optimizer_step_count": optimizer_steps,
-        "parameter_count": int(primary["parameter_count"]),
+        "parameter_count_definition_version": (
+            PARAMETER_COUNT_DEFINITION_VERSION
+        ),
+        "parameter_count_scope": PARAMETER_COUNT_SCOPE,
+        "parameter_scalar_policy": PARAMETER_SCALAR_POLICY,
+        "trainable_parameter_count": digital_counts[
+            "trainable_parameter_count"
+        ],
+        "fixed_random_parameter_count": digital_counts[
+            "fixed_random_parameter_count"
+        ],
+        "total_stored_parameter_count": digital_counts[
+            "total_stored_parameter_count"
+        ],
         "per_model": [
             {
                 "candidate_id": outcome.candidate_id,
@@ -1083,19 +1499,80 @@ def _build_run(
         ),
     }
     write_strict_json(staging / "training_compute.json", compute)
+    comparison_data = _PhysicalSourceComparison(
+        preflight=physical,
+        completed=physical.completed,
+        test_rows=physical_test_data.rows,
+        validation_rows=physical.validation_rows,
+        reference={},
+    )
     fairness = _fairness_rows(
         spec,
         dataset=dataset,
-        physical=physical,
+        physical=comparison_data,
         selection=persisted_selection,
         primary=primary,
+        digital_counts=digital_counts,
         compute=compute,
         run_id=stable_object_hash(dict(identity)),
+    )
+    events.append(
+        {
+            "event": "fairness_comparison_computed",
+            "plan_content_hash": persisted_plan["plan_content_hash"],
+            "selection_record_hash": persisted_selection_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_test_metrics_sha256": physical_test_data.file_sha256,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
+        }
+    )
+    verified_physical = _fully_verified_physical_source(
+        physical,
+        physical_test_data,
+        repo_root=repo_root,
+        digital_plan_hash=persisted_plan["plan_content_hash"],
+    )
+    events.append(
+        {
+            "event": "physical_source_full_verified",
+            "plan_content_hash": persisted_plan["plan_content_hash"],
+            "selection_record_hash": persisted_selection_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_test_metrics_sha256": physical_test_data.file_sha256,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
+            "source_full_verification_evidence_hash": (
+                verified_physical.reference["postfreeze"][
+                    "full_verification_evidence_hash"
+                ]
+            ),
+        }
+    )
+    write_strict_json(
+        staging / "physical_source_reference.json",
+        verified_physical.reference,
     )
     write_csv(
         staging / "fairness_comparison.csv",
         fairness,
         fieldnames=list(fairness[0]),
+    )
+    events.append(
+        {
+            "event": "fairness_comparison_written",
+            "plan_content_hash": persisted_plan["plan_content_hash"],
+            "selection_record_hash": persisted_selection_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_test_metrics_sha256": physical_test_data.file_sha256,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
+            "source_full_verification_evidence_hash": (
+                verified_physical.reference["postfreeze"][
+                    "full_verification_evidence_hash"
+                ]
+            ),
+        }
     )
 
     summary = {
@@ -1106,6 +1583,9 @@ def _build_run(
         "profile": spec.profile,
         "run_id": stable_object_hash(dict(identity)),
         "model_kind": "fno1d",
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": _lifting_input_channels(spec),
+        "domain_length": float(dataset.domain_length),
         "dataset_artifact_id": dataset.artifact_id,
         "dataset_split_hash": dataset.split_hash,
         "n_ref": int(dataset.reference_nx),
@@ -1113,14 +1593,33 @@ def _build_run(
         "q": int(spec.output.q),
         "candidate_count": len(spec.model.candidates),
         "selected_candidate_id": selected_candidate_id,
-        "parameter_count": int(primary["parameter_count"]),
+        "parameter_count_scope": PARAMETER_COUNT_SCOPE,
+        "parameter_scalar_policy": PARAMETER_SCALAR_POLICY,
+        "parameter_count_definition_version": (
+            PARAMETER_COUNT_DEFINITION_VERSION
+        ),
+        "model_family_parameter_count_policy": {
+            "physical_feature_readout": (
+                "frozen_tensor_shapes_cross_checked_against_readout_formula"
+            ),
+            "digital_neural_operator": (
+                "frozen_state_dict_real_scalars_cross_checked_against_training"
+            ),
+            "physical_dynamics_included": False,
+            "hardware_components_included": False,
+        },
+        "primary_model_parameter_counts": dict(digital_counts),
         "selection_seed_count": len(spec.training.selection_seeds),
         "evaluation_seed_count": len(spec.training.evaluation_seeds),
         "selection_record_hash": persisted_selection_hash,
         "frozen_plan_hash": persisted_plan["plan_content_hash"],
         "frozen_checkpoint_archive_sha256": archive_sha256,
         "physical_source_run_hash": physical.completed.run_hash,
-        "physical_source_verified_before_training": True,
+        "physical_source_manifest_sha256": source_manifest_hash,
+        "physical_source_preflight_verified_before_training": True,
+        "physical_source_test_parsed_after_freeze": True,
+        "physical_source_fully_verified_before_fairness_publication": True,
+        "physical_source_test_metrics_sha256": physical_test_data.file_sha256,
         "freeze_verified_before_test": True,
         "primary_test_result_kind": primary["test_result_kind"],
         "prediction_ensemble_separate": True,
@@ -1132,6 +1631,12 @@ def _build_run(
         {
             "event": "numerical_run_complete",
             "run_id": summary["run_id"],
+            "plan_content_hash": persisted_plan["plan_content_hash"],
+            "selection_record_hash": persisted_selection_hash,
+            "source_manifest_sha256": source_manifest_hash,
+            "source_test_metrics_sha256": physical_test_data.file_sha256,
+            "source_selection_record_hash": source_selection_hash,
+            "source_frozen_plan_hash": source_plan_hash,
         }
     )
     write_strict_json(staging / "events.json", events)
@@ -1145,7 +1650,7 @@ def run_digital_baseline(
     force: bool = False,
 ) -> DigitalBaselineRun:
     """Run/reuse one digital baseline without entering physical StudyRunner."""
-    physical = _physical_source(spec, repo_root=repo_root)
+    physical = _physical_source_preflight(spec, repo_root=repo_root)
     dataset_spec = load_dataset_spec(spec.dataset_spec, repo_root=repo_root)
     dataset = ensure_dataset(dataset_spec, repo_root=repo_root, force=False)
     if (
@@ -1189,6 +1694,7 @@ def run_digital_baseline(
             dataset=dataset,
             physical=physical,
             identity=identity,
+            repo_root=repo_root,
         )
         transaction.publish(
             lambda root: verify_digital_baseline_run(root)
@@ -1247,6 +1753,7 @@ def verify_digital_baseline_run(path: Path | str) -> dict[str, Any]:
     selection, selection_hash, plan, archive = _read_frozen_boundary(
         root,
         spec,
+        domain_length=float(identity["dataset"]["domain_length"]),
     )
     dataset_reference = json.loads(
         (root / "dataset_reference.json").read_text(encoding="utf-8")
@@ -1256,6 +1763,12 @@ def verify_digital_baseline_run(path: Path | str) -> dict[str, Any]:
             encoding="utf-8"
         )
     )
+    if (
+        not isinstance(source_reference, dict)
+        or not isinstance(source_reference.get("preflight"), dict)
+        or not isinstance(source_reference.get("postfreeze"), dict)
+    ):
+        raise ValueError("digital physical source reference is invalid")
     summary = json.loads(
         (root / "run_summary.json").read_text(encoding="utf-8")
     )
@@ -1276,9 +1789,26 @@ def verify_digital_baseline_run(path: Path | str) -> dict[str, Any]:
     )
     if (
         identity.get("dataset") != dataset_reference
-        or identity.get("physical_source") != source_reference
+        or source_reference.get("schema_version")
+        != "pol-digital-physical-source-reference-v3"
+        or identity.get("physical_source")
+        != source_reference.get("preflight")
     ):
         raise ValueError("digital run references do not match identity")
+    source_preflight_reference = source_reference["preflight"]
+    if (
+        plan.get("physical_source_run_hash")
+        != source_preflight_reference.get("run_hash")
+        or plan.get("physical_source_preflight_manifest_sha256")
+        != source_preflight_reference.get("preflight_manifest_sha256")
+        or plan.get("physical_source_selection_record_hash")
+        != source_preflight_reference.get("selection_record_hash")
+        or plan.get("physical_source_frozen_plan_hash")
+        != source_preflight_reference.get("frozen_plan_hash")
+    ):
+        raise ValueError(
+            "digital frozen plan disagrees with physical-source preflight"
+        )
     if (
         summary.get("run_id") != run_id
         or summary.get("selection_record_hash") != selection_hash
@@ -1287,6 +1817,21 @@ def verify_digital_baseline_run(path: Path | str) -> dict[str, Any]:
         != selection.get("selected_candidate_id")
         or summary.get("freeze_verified_before_test") is not True
         or summary.get("prediction_ensemble_separate") is not True
+        or summary.get("coordinate_channel")
+        != spec.model.coordinate_channel
+        or summary.get("lifting_input_channels")
+        != _lifting_input_channels(spec)
+        or summary.get("domain_length")
+        != float(dataset_reference["domain_length"])
+        or summary.get(
+            "physical_source_preflight_verified_before_training"
+        )
+        is not True
+        or summary.get("physical_source_test_parsed_after_freeze") is not True
+        or summary.get(
+            "physical_source_fully_verified_before_fairness_publication"
+        )
+        is not True
     ):
         raise ValueError("digital run summary disagrees with frozen records")
     if summary.get("frozen_checkpoint_archive_sha256") != file_sha256(
@@ -1297,6 +1842,50 @@ def verify_digital_baseline_run(path: Path | str) -> dict[str, Any]:
         archive["models"]
     ):
         raise ValueError("digital evaluation seed count mismatch")
+    digital_counts = fno_parameter_counts(archive)
+    expected_compute_counts = {
+        "coordinate_channel": spec.model.coordinate_channel,
+        "lifting_input_channels": _lifting_input_channels(spec),
+        "domain_length": float(dataset_reference["domain_length"]),
+        "parameter_count_definition_version": (
+            PARAMETER_COUNT_DEFINITION_VERSION
+        ),
+        "parameter_count_scope": PARAMETER_COUNT_SCOPE,
+        "parameter_scalar_policy": PARAMETER_SCALAR_POLICY,
+        "trainable_parameter_count": digital_counts[
+            "trainable_parameter_count"
+        ],
+        "fixed_random_parameter_count": digital_counts[
+            "fixed_random_parameter_count"
+        ],
+        "total_stored_parameter_count": digital_counts[
+            "total_stored_parameter_count"
+        ],
+    }
+    if any(
+        compute.get(key) != value
+        for key, value in expected_compute_counts.items()
+    ):
+        raise ValueError("digital training compute parameter-count mismatch")
+    if (
+        summary.get("parameter_count_scope") != PARAMETER_COUNT_SCOPE
+        or summary.get("parameter_scalar_policy") != PARAMETER_SCALAR_POLICY
+        or summary.get("parameter_count_definition_version")
+        != PARAMETER_COUNT_DEFINITION_VERSION
+        or summary.get("primary_model_parameter_counts") != digital_counts
+        or summary.get("model_family_parameter_count_policy")
+        != {
+            "physical_feature_readout": (
+                "frozen_tensor_shapes_cross_checked_against_readout_formula"
+            ),
+            "digital_neural_operator": (
+                "frozen_state_dict_real_scalars_cross_checked_against_training"
+            ),
+            "physical_dynamics_included": False,
+            "hardware_components_included": False,
+        }
+    ):
+        raise ValueError("digital summary parameter-count policy mismatch")
 
     seed_rows = _read_csv(root / "test_seed_metrics.csv")
     primary_rows = _read_csv(root / "test_metrics.csv")
@@ -1309,6 +1898,16 @@ def verify_digital_baseline_run(path: Path | str) -> dict[str, Any]:
         or len(fairness_rows) != len(spec.physical_comparison.rows) + 1
     ):
         raise ValueError("digital result table row count mismatch")
+    for row in [*seed_rows, *primary_rows, *ensemble_rows]:
+        if (
+            row.get("coordinate_channel")
+            != spec.model.coordinate_channel
+            or int(row.get("lifting_input_channels", -1))
+            != _lifting_input_channels(spec)
+        ):
+            raise ValueError(
+                "digital result row coordinate architecture mismatch"
+            )
     if primary_rows[0].get("test_result_kind") != (
         "independent_training_seed_metric_summary"
     ):
@@ -1341,15 +1940,35 @@ def verify_digital_baseline_run(path: Path | str) -> dict[str, Any]:
     ):
         raise ValueError("digital fairness table conflates primary and ensemble")
 
-    physical = _physical_source(spec, repo_root=Path.cwd().resolve())
+    physical_preflight = _physical_source_preflight(
+        spec,
+        repo_root=Path.cwd().resolve(),
+    )
+    if physical_preflight.reference != source_reference.get("preflight"):
+        raise ValueError(
+            "digital physical source preflight no longer matches its reference"
+        )
+    physical_test_data = _physical_test_rows_after_freeze(
+        physical_preflight
+    )
+    physical = _fully_verified_physical_source(
+        physical_preflight,
+        physical_test_data,
+        repo_root=Path.cwd().resolve(),
+        digital_plan_hash=str(plan["plan_content_hash"]),
+    )
     if physical.reference != source_reference:
-        raise ValueError("digital physical source no longer matches its reference")
+        raise ValueError(
+            "digital physical source full verification no longer matches "
+            "its reference"
+        )
     expected_fairness = _fairness_rows(
         spec,
         dataset=physical.completed.dataset,
         physical=physical,
         selection=selection,
         primary=primary_rows[0],
+        digital_counts=digital_counts,
         compute=compute,
         run_id=run_id,
     )
@@ -1387,21 +2006,76 @@ def verify_digital_baseline_run(path: Path | str) -> dict[str, Any]:
         if isinstance(event, Mapping)
     ]
     required = [
-        "physical_source_verified",
+        "physical_source_preflight_verified",
         "selection_complete",
         "freeze_written",
         "freeze_read_back",
         "first_test_tensor_request",
+        "physical_source_test_rows_parsed",
         "first_test_metric",
+        "fairness_comparison_computed",
+        "physical_source_full_verified",
+        "fairness_comparison_written",
         "numerical_run_complete",
     ]
-    if any(name not in names for name in required):
+    if any(names.count(name) != 1 for name in required):
         raise ValueError("digital event log is incomplete")
     if not all(
         names.index(left) < names.index(right)
         for left, right in zip(required, required[1:])
     ):
         raise ValueError("digital freeze/test event order is invalid")
+    by_name = {
+        str(event["event"]): event
+        for event in events
+        if isinstance(event, Mapping) and "event" in event
+    }
+    source_preflight = source_reference["preflight"]
+    source_postfreeze = source_reference["postfreeze"]
+    for name in required:
+        event = by_name[name]
+        if (
+            event.get("source_manifest_sha256")
+            != source_preflight["preflight_manifest_sha256"]
+            or event.get("source_selection_record_hash")
+            != source_preflight["selection_record_hash"]
+            or event.get("source_frozen_plan_hash")
+            != source_preflight["frozen_plan_hash"]
+        ):
+            raise ValueError(
+                "digital event has the wrong physical-source preflight binding"
+            )
+    for name in required[1:]:
+        event = by_name[name]
+        if event.get("selection_record_hash") != selection_hash:
+            raise ValueError(
+                "digital event has the wrong selection-record binding"
+            )
+    for name in required[2:]:
+        event = by_name[name]
+        if event.get("plan_content_hash") != plan["plan_content_hash"]:
+            raise ValueError(
+                "digital event has the wrong frozen-plan binding"
+            )
+    for name in required[5:]:
+        event = by_name[name]
+        if (
+            event.get("source_test_metrics_sha256")
+            != source_postfreeze["test_metrics_sha256"]
+        ):
+            raise ValueError(
+                "digital event has the wrong physical test-table binding"
+            )
+    for name in (
+        "physical_source_full_verified",
+        "fairness_comparison_written",
+    ):
+        if by_name[name].get(
+            "source_full_verification_evidence_hash"
+        ) != source_postfreeze["full_verification_evidence_hash"]:
+            raise ValueError(
+                "digital event has the wrong full-source verification binding"
+            )
     return manifest
 
 

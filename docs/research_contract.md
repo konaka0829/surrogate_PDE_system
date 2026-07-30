@@ -303,11 +303,16 @@ produced by the shared primitive.
 Before requesting a test feature state or computing any test metric, the
 runner must:
 
-1. write the selection record;
-2. hash the selection record;
-3. write the frozen model archive and frozen evaluation plan;
-4. hash those files;
-5. read them back and verify their identities and exact bytes.
+1. complete study-level candidate and readout-hyperparameter selection using
+   train/validation data;
+2. materialize evaluation-seed members only for each selected
+   random-feature case/readout, again using train/validation data, without
+   feeding their audit metrics back into selection;
+3. complete required convergence checks;
+4. write and hash the selection record;
+5. write and hash the frozen model archive and frozen evaluation plan;
+6. read all frozen-selection artifacts back and verify their identities and
+   exact bytes.
 
 Test data must not affect convergence checks, tie breaking, candidate
 selection, rerun decisions, or the contents of the frozen plan.
@@ -368,6 +373,15 @@ Each random-feature seed for Model 3 is an independent model realization. The
 primary result must aggregate **per-seed metrics**, reporting at least their
 mean, standard deviation, and a stated confidence interval. The interval
 method and the number of seeds must be recorded.
+
+The inner structural search reuses a seeded random map and its lifted
+train/validation tensors across ridge candidates. Candidate evaluation stores
+a selection recipe, not a set of evaluation-seed models. Evaluation members
+are fitted only after study-level selection and only for the selected
+case/readout. The pure workload plan reports selection maps, lifts, ridge
+fits, selected-only evaluation fits, and the legacy eager comparison
+separately; unresolved upstream selection conditions produce null counts
+rather than invented estimates.
 
 At least two distinct evaluation seeds are required. For seed metrics
 \(m_1,\ldots,m_S\), the implemented primary summary is the arithmetic mean,
@@ -487,7 +501,7 @@ Fourier coefficient/data-field/reference-field metrics used by physical
 studies. Its public interface is
 
 ```text
-finite input field on n_tar plus a dimensionless periodic coordinate
+finite input field on n_tar, with no absolute coordinate by default
     -> FNO1d spectral/local layers on n_tar
     -> finite output field on n_tar
     -> q real L2-orthonormal Fourier coefficients
@@ -507,6 +521,15 @@ architectures; a disjoint configured evaluation-seed set is trained only
 after the architecture choice. Each evaluation seed is an independent neural
 network realization with its own validation-selected epoch checkpoint.
 
+The periodic Burgers baseline uses `coordinate_channel=none`: spectral
+convolutions and pointwise layers then preserve circular-shift equivariance,
+matching a stationary input law and translation-equivariant target operator.
+The optional `periodic_sin_cos` policy deliberately appends
+`sin(2*pi*x/L), cos(2*pi*x/L)` on the endpoint-free physical grid
+`x_j=L*j/n_tar`; it supplies absolute periodic position and therefore
+generally changes translation equivariance. The removed `unit_periodic` ramp
+is not periodic and is rejected with an explicit migration error.
+
 Before requesting the finite test view or computing a test metric, the adapter
 writes and hashes its validation-only selection record, writes the frozen
 evaluation-seed checkpoints and evaluation plan, hashes their exact bytes and
@@ -516,8 +539,15 @@ using the same Bessel-corrected standard deviation and two-sided 95%
 Student-t interval as Model 3. Prediction averaging is a separately labeled
 ensemble table.
 
-Every run first resolves an exact verified
-`dynamic_feature_baseline_comparison` source without executing it. The
+Every run first verifies the exact source manifest bytes, dataset binding,
+validation rows, selection record, frozen plan, and frozen models without
+parsing physical test values or executing the source. Only after the digital
+selection record and frozen evaluation boundary have been written, hashed,
+and read back may the adapter request either digital test tensors or parse the
+physical source test table. Before writing the fairness table, it verifies the
+full physical source, requires its manifest and test-table hashes to remain
+unchanged, and records these preflight and post-freeze hashes in the source
+reference and ordered event log. The
 predeclared fairness table requires the same dataset, split, `n_tar`, and `q`;
 records input/output dimension, model parameter count, validation selection
 metric, separate field/data metrics and floors, seed statistics, and the
@@ -525,12 +555,25 @@ distinct inference paths. Digital training wall/process time is recorded, but
 energy is not measured and physical/digital wall-clock or energy comparison is
 explicitly disallowed without a common measurement protocol.
 
-`pol-digital-baseline-v1` configurations and
-`pol-digital-baseline-run-manifest-v1` outputs are content addressed with
+`pol-digital-baseline-v3` configurations and
+`pol-digital-baseline-run-manifest-v4` outputs are content addressed with
 storage paths excluded from identity, transactionally published, and
 exact-byte plus semantic/tensor-hash verified. The checked-in smoke profile is
 an execution-path check only. The checked-in main training budget has not been
 executed and establishes no FNO performance claim.
+
+Fairness parameter counts use
+`pol-real-scalar-parameter-count-v1` and always describe one independent model
+realization. Direct decoding stores no model parameters. Affine readouts count
+their frozen `W,b` tensors as trainable. Random-feature readouts count frozen
+`A,c` as fixed random parameters and `W,b` as trainable, including the
+skip-connected input columns; the primary per-seed result is not multiplied by
+the number of seeds. A separate field reports storage across all frozen
+realizations. FNO counts are reconstructed from each frozen state dictionary
+and cross-checked against the training outcome; complex entries, if ever
+introduced, count as two real scalars. These model-capacity counts exclude the
+fixed physical dynamics and do not estimate analog or other hardware
+components, wall-clock cost, or energy.
 
 ## Readout stability under feature noise
 
@@ -799,6 +842,11 @@ construction, or study execution.
 
 ## Execution and reporting
 
+- Scientific JSON and CLI override parsing reject `NaN`, `Infinity`, and
+  `-Infinity` before model construction. Strict models reject non-finite
+  floats, including values nested in sweep axes, overrides, source imports,
+  optimizer settings, tolerances, and reporter coordinates. Unknown keys
+  remain forbidden.
 - The validated first-paper workflow is CPU-only. Its public validation schema
   accepts only `samples.device="cpu"` (the default) and rejects `"cuda"`,
   `"auto"`, and unknown values before numerical work begins.
@@ -823,6 +871,21 @@ construction, or study execution.
   tiny or smoke profiles only.
 - Figure generation consumes a verified, completed result. A request to render
   or regenerate a figure must not implicitly start a numerical experiment.
+- Project-owned directory components such as study/report/digital-baseline
+  names and profiles use the explicit ASCII policy
+  `[A-Za-z0-9][A-Za-z0-9_-]*`. They are nonempty basenames, never `.` or
+  `..`, never dot-prefixed, and contain no separator, surrounding whitespace,
+  or control character. User-selected storage roots remain ordinary paths and
+  are not constrained by this component policy.
+- Study and cross-run reporter filenames use the same policy and are declared
+  without an extension. Reporter formats are nonempty and unique. A configured
+  study reporter completes only after producing exactly one file for every
+  declared format; zero, duplicate, missing, or unexpected outputs fail the
+  reporting transaction. No current reporter has an allow-empty policy.
+- A completed study summary records the configured reporter count, exact
+  expected and generated figure counts, expected filenames, and completion
+  policy. The completed-run verifier binds those values to the resolved study,
+  manifest file tree, and exact artifact bytes.
 - Publication labels `E0` through `E7` and Figure numbers may appear only in a
   documentation-level correspondence table. They must not name core packages,
   modules, runners, dispatch branches, schemas, or artifact kinds.

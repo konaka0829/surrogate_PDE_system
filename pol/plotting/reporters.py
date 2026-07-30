@@ -26,12 +26,24 @@ from pol.config.models import (
 
 def _save(fig, root: Path, filename: str, formats: Iterable[str], dpi: int) -> list[str]:
     names: list[str] = []
-    stem = Path(filename).stem
     for extension in formats:
-        name = f"{stem}.{extension}"
+        name = f"{filename}.{extension}"
         fig.savefig(root / name, dpi=dpi, bbox_inches="tight")
         names.append(name)
     plt.close(fig)
+    return names
+
+
+def expected_reporter_outputs(
+    reporters: Iterable[ReporterSpec],
+) -> list[str]:
+    names = [
+        f"{reporter.filename}.{extension}"
+        for reporter in reporters
+        for extension in reporter.formats
+    ]
+    if len(names) != len(set(names)):
+        raise ValueError("configured reporters have duplicate output filenames")
     return names
 
 
@@ -739,56 +751,52 @@ def generate_reporters(
     output_dir: Path,
     skipped_rows: Iterable[dict[str, Any]] = (),
 ) -> list[str]:
+    reporters = tuple(reporters)
+    expected_all = expected_reporter_outputs(reporters)
     output_dir.mkdir(parents=True, exist_ok=True)
     created: list[str] = []
     for reporter in reporters:
         if isinstance(reporter, MetricCurveReporterSpec):
-            created.extend(
-                _metric_curve(
-                    reporter,
-                    _table_for_split(reporter.split, validation_rows, test_rows),
-                    output_dir,
-                )
+            rendered = _metric_curve(
+                reporter,
+                _table_for_split(reporter.split, validation_rows, test_rows),
+                output_dir,
             )
         elif isinstance(reporter, MetricMapReporterSpec):
-            created.extend(
-                _metric_map(
-                    reporter,
-                    _table_for_split(reporter.split, validation_rows, test_rows),
-                    output_dir,
-                    skipped_rows=skipped_rows,
-                )
+            rendered = _metric_map(
+                reporter,
+                _table_for_split(reporter.split, validation_rows, test_rows),
+                output_dir,
+                skipped_rows=skipped_rows,
             )
         elif isinstance(reporter, ReadoutStabilityReporterSpec):
             if reporter.plot == "noise_curve":
-                created.extend(_noise_curve(reporter, noise_rows, output_dir))
+                rendered = _noise_curve(reporter, noise_rows, output_dir)
             else:
-                created.extend(
-                    _stability_scatter(reporter, noise_rows, output_dir)
-                )
-        elif isinstance(reporter, LearningCurveReporterSpec):
-            created.extend(
-                _learning_curve(
+                rendered = _stability_scatter(
                     reporter,
-                    _table_for_split(
-                        reporter.split,
-                        validation_rows,
-                        test_rows,
-                    ),
+                    noise_rows,
                     output_dir,
                 )
+        elif isinstance(reporter, LearningCurveReporterSpec):
+            rendered = _learning_curve(
+                reporter,
+                _table_for_split(
+                    reporter.split,
+                    validation_rows,
+                    test_rows,
+                ),
+                output_dir,
             )
         elif isinstance(
             reporter,
             RandomFeatureSeedDistributionReporterSpec,
         ):
-            created.extend(
-                _random_seed_distribution(
-                    reporter,
-                    list(random_seed_rows),
-                    test_rows,
-                    output_dir,
-                )
+            rendered = _random_seed_distribution(
+                reporter,
+                list(random_seed_rows),
+                test_rows,
+                output_dir,
             )
         elif isinstance(
             reporter,
@@ -799,12 +807,10 @@ def generate_reporters(
                     "representative prediction reporter requires a completed "
                     "prediction capture"
                 )
-            created.extend(
-                _representative_prediction_fields(
-                    reporter,
-                    prediction_capture,
-                    output_dir,
-                )
+            rendered = _representative_prediction_fields(
+                reporter,
+                prediction_capture,
+                output_dir,
             )
         elif isinstance(reporter, FourierErrorSpectraReporterSpec):
             if prediction_capture is None:
@@ -812,21 +818,41 @@ def generate_reporters(
                     "Fourier spectrum reporter requires a completed "
                     "prediction capture"
                 )
-            created.extend(
-                _fourier_error_spectra(
-                    reporter,
-                    prediction_capture,
-                    output_dir,
-                )
+            rendered = _fourier_error_spectra(
+                reporter,
+                prediction_capture,
+                output_dir,
             )
         elif isinstance(reporter, HeatMultiplierComparisonReporterSpec):
-            created.extend(
-                _heat_multiplier_comparison(
-                    reporter,
-                    multiplier_rows,
-                    output_dir,
-                )
+            rendered = _heat_multiplier_comparison(
+                reporter,
+                multiplier_rows,
+                output_dir,
             )
         else:
             raise TypeError(f"unsupported reporter type: {type(reporter).__name__}")
+        expected = [
+            f"{reporter.filename}.{extension}"
+            for extension in reporter.formats
+        ]
+        if rendered != expected:
+            raise ValueError(
+                f"reporter {reporter.kind!r} for {reporter.filename!r} "
+                f"produced {rendered!r}; expected exactly {expected!r}"
+            )
+        for name in rendered:
+            path = output_dir / name
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"reporter output is missing or unsafe: {name}")
+        created.extend(rendered)
+    actual = sorted(
+        path.relative_to(output_dir).as_posix()
+        for path in output_dir.rglob("*")
+        if path.is_file() or path.is_symlink()
+    )
+    if actual != sorted(expected_all) or sorted(created) != sorted(expected_all):
+        raise ValueError(
+            "reporter output directory contains missing, duplicate, or "
+            "unexpected files"
+        )
     return created

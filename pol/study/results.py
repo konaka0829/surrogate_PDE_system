@@ -440,7 +440,13 @@ def build_run_summary(
     selection_source_provenance: Mapping[str, Mapping[str, Any]],
     prediction_capture_entry_count: int,
     prediction_capture_content_hash: str | None,
+    materialization_workload: Mapping[str, int],
 ) -> dict[str, Any]:
+    expected_figures = sorted(
+        f"{reporter.filename}.{extension}"
+        for reporter in spec.reporters
+        for extension in reporter.formats
+    )
     planned_global_axis_combination_count = 1
     for axis in spec.global_axes:
         planned_global_axis_combination_count *= len(axis.values)
@@ -448,7 +454,7 @@ def build_run_summary(
         planned_global_axis_combination_count * len(spec.variants)
     )
     return {
-        "schema_version": "pol-study-run-summary-v14",
+        "schema_version": "pol-study-run-summary-v16",
         **execution_device_policy(),
         "status": "pass",
         "study": spec.name,
@@ -474,6 +480,17 @@ def build_run_summary(
         "primary_test_row_count": len(test_rows),
         "random_feature_seed_row_count": len(random_seed_rows),
         "random_feature_ensemble_row_count": len(random_ensemble_rows),
+        "random_feature_lifecycle": {
+            "policy": (
+                "selected_candidate_readout_only_after_validation_selection_v1"
+            ),
+            "materialization_split": "train_validation_only",
+            "evaluation_seed_metrics_used_for_selection": False,
+            **{
+                str(key): int(value)
+                for key, value in materialization_workload.items()
+            },
+        },
         "selected_comparison_row_count": len(comparison_rows),
         "heat_multiplier_coefficient_row_count": len(multiplier_rows),
         "heat_multiplier_summary_row_count": len(multiplier_summary_rows),
@@ -524,6 +541,13 @@ def build_run_summary(
         "evaluated_cartesian_cell_count": evaluated_cartesian_cell_count,
         "skipped_cartesian_cell_count": skipped_cartesian_cell_count,
         "figures": created_figures,
+        "expected_figures": expected_figures,
+        "configured_reporter_count": len(spec.reporters),
+        "report_expected_file_count": len(expected_figures),
+        "report_generated_file_count": len(created_figures),
+        "report_completion_policy": (
+            "configured_reporter_exactly_one_file_per_format_v1"
+        ),
         "numerical_publication_status": "complete_verified_before_reporting",
         "report_status": (
             "numerical_complete_report_not_generated"
@@ -538,7 +562,7 @@ def write_run_manifest(
     root: Path,
     *,
     identity: Mapping[str, Any],
-    schema_version: str = "pol-study-run-manifest-v14",
+    schema_version: str = "pol-study-run-manifest-v16",
 ) -> None:
     names = sorted(
         path.relative_to(root).as_posix()

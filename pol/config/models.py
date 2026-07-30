@@ -15,9 +15,19 @@ from pydantic import (
     model_validator,
 )
 
+from .json_values import ensure_finite_json_value
+from .names import (
+    validate_extension_free_filename,
+    validate_safe_path_component,
+)
+
 
 class StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        allow_inf_nan=False,
+    )
 
 
 class DomainSpec(StrictModel):
@@ -704,6 +714,11 @@ class SweepAxisSpec(StrictModel):
     path: str
     values: tuple[JsonValue, ...]
 
+    @field_validator("values", mode="before")
+    @classmethod
+    def _finite_json_values(cls, value: object) -> object:
+        return ensure_finite_json_value(value)
+
     @model_validator(mode="after")
     def _values(self) -> "SweepAxisSpec":
         if not self.values:
@@ -738,6 +753,11 @@ class CoordinateAxisSpec(StrictModel):
     path: str
     values: tuple[JsonValue, ...]
     anchor: JsonValue
+
+    @field_validator("values", "anchor", mode="before")
+    @classmethod
+    def _finite_json_values(cls, value: object) -> object:
+        return ensure_finite_json_value(value)
 
     @model_validator(mode="after")
     def _values(self) -> "CoordinateAxisSpec":
@@ -800,6 +820,11 @@ class VariantSpec(StrictModel):
     selection_source: CompletedStudySelectionSourceSpec | None = None
     overrides: dict[str, JsonValue] = Field(default_factory=dict)
     search: SearchSpec = Field(default_factory=StaticSearchSpec)
+
+    @field_validator("overrides", mode="before")
+    @classmethod
+    def _finite_overrides(cls, value: object) -> object:
+        return ensure_finite_json_value(value)
 
 
 FeatureFamily = Literal[
@@ -927,7 +952,22 @@ DiagnosticSpec = Annotated[
 ]
 
 
-class MetricCurveReporterSpec(StrictModel):
+class _ReporterOutputContract(StrictModel):
+    @model_validator(mode="after")
+    def _output_contract(self) -> "_ReporterOutputContract":
+        validate_extension_free_filename(
+            str(getattr(self, "filename")),
+            field="study reporter filename",
+        )
+        formats = tuple(getattr(self, "formats"))
+        if not formats:
+            raise ValueError("study reporter formats must not be empty")
+        if len(set(formats)) != len(formats):
+            raise ValueError("study reporter formats must be unique")
+        return self
+
+
+class MetricCurveReporterSpec(_ReporterOutputContract):
     kind: Literal["metric_curve"] = "metric_curve"
     filename: str
     x: str
@@ -940,7 +980,7 @@ class MetricCurveReporterSpec(StrictModel):
     dpi: PositiveInt = 120
 
 
-class MetricMapReporterSpec(StrictModel):
+class MetricMapReporterSpec(_ReporterOutputContract):
     kind: Literal["metric_map"] = "metric_map"
     filename: str
     x: str
@@ -970,7 +1010,7 @@ class MetricMapReporterSpec(StrictModel):
         return self
 
 
-class ReadoutStabilityReporterSpec(StrictModel):
+class ReadoutStabilityReporterSpec(_ReporterOutputContract):
     kind: Literal["readout_stability"] = "readout_stability"
     filename: str
     plot: Literal["noise_curve", "error_vs_norm", "condition_vs_error"]
@@ -979,7 +1019,7 @@ class ReadoutStabilityReporterSpec(StrictModel):
     dpi: PositiveInt = 120
 
 
-class LearningCurveReporterSpec(StrictModel):
+class LearningCurveReporterSpec(_ReporterOutputContract):
     kind: Literal["learning_curve"] = "learning_curve"
     filename: str
     metric: str = "test_field_relative_l2_mean"
@@ -991,7 +1031,7 @@ class LearningCurveReporterSpec(StrictModel):
     dpi: PositiveInt = 120
 
 
-class RandomFeatureSeedDistributionReporterSpec(StrictModel):
+class RandomFeatureSeedDistributionReporterSpec(_ReporterOutputContract):
     kind: Literal["random_feature_seed_distribution"] = (
         "random_feature_seed_distribution"
     )
@@ -1004,7 +1044,7 @@ class RandomFeatureSeedDistributionReporterSpec(StrictModel):
     dpi: PositiveInt = 120
 
 
-class RepresentativePredictionFieldsReporterSpec(StrictModel):
+class RepresentativePredictionFieldsReporterSpec(_ReporterOutputContract):
     kind: Literal["representative_prediction_fields"] = (
         "representative_prediction_fields"
     )
@@ -1013,7 +1053,7 @@ class RepresentativePredictionFieldsReporterSpec(StrictModel):
     dpi: PositiveInt = 120
 
 
-class FourierErrorSpectraReporterSpec(StrictModel):
+class FourierErrorSpectraReporterSpec(_ReporterOutputContract):
     kind: Literal["fourier_error_spectra"] = "fourier_error_spectra"
     filename: str
     metric: Literal[
@@ -1026,7 +1066,7 @@ class FourierErrorSpectraReporterSpec(StrictModel):
     dpi: PositiveInt = 120
 
 
-class HeatMultiplierComparisonReporterSpec(StrictModel):
+class HeatMultiplierComparisonReporterSpec(_ReporterOutputContract):
     kind: Literal["heat_multiplier_comparison"] = (
         "heat_multiplier_comparison"
     )
@@ -1126,6 +1166,15 @@ class StudySpec(StrictModel):
     reporters: tuple[ReporterSpec, ...] = ()
     execution: ExecutionSpec = Field(default_factory=ExecutionSpec)
 
+    @field_validator("name", "profile")
+    @classmethod
+    def _safe_output_components(cls, value: str, info: object) -> str:
+        field_name = str(getattr(info, "field_name", "path component"))
+        return validate_safe_path_component(
+            value,
+            field=f"study {field_name}",
+        )
+
     @model_validator(mode="after")
     def _study(self) -> "StudySpec":
         if not self.variants:
@@ -1144,6 +1193,15 @@ class StudySpec(StrictModel):
         diagnostic_kinds = [diagnostic.kind for diagnostic in self.diagnostics]
         if len(diagnostic_kinds) != len(set(diagnostic_kinds)):
             raise ValueError("diagnostic kinds must be unique")
+        reporter_outputs = [
+            (reporter.filename, extension)
+            for reporter in self.reporters
+            for extension in reporter.formats
+        ]
+        if len(reporter_outputs) != len(set(reporter_outputs)):
+            raise ValueError(
+                "study reporters must have unique (filename, format) outputs"
+            )
         comparison = self.comparison
         if comparison is not None:
             if self.schema_version != "pol-study-v4":

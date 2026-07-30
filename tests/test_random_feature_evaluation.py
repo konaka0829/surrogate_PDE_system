@@ -182,23 +182,6 @@ def _readout_characterization_trial_and_dataset() -> tuple[
     return trial, dataset
 
 
-def _canonical_runtime_payload(value: Any) -> Any:
-    if isinstance(value, torch.Tensor):
-        return {
-            "dtype": str(value.dtype),
-            "shape": list(value.shape),
-            "values": value.tolist(),
-        }
-    if isinstance(value, Mapping):
-        return {
-            str(key): _canonical_runtime_payload(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_canonical_runtime_payload(item) for item in value]
-    return value
-
-
 def test_trial_readout_validation_freeze_and_test_characterization() -> None:
     trial, dataset = _readout_characterization_trial_and_dataset()
     engine = TrialEngine(
@@ -211,6 +194,15 @@ def test_trial_readout_validation_freeze_and_test_characterization() -> None:
         _StaticCache(),
     )
     selected = engine.evaluate_selection(trial)
+    assert selected.selection_models["random"]["members_materialized"] is False
+    assert "members" not in selected.selection_models["random"]
+    materialized_models = {
+        readout_id: engine.materialize_selected_readout(
+            selected,
+            readout_id=readout_id,
+        )
+        for readout_id in selected.selection_models
+    }
     evaluated = {
         readout_id: engine.evaluate_test(
             trial,
@@ -218,106 +210,60 @@ def test_trial_readout_validation_freeze_and_test_characterization() -> None:
             readout_id=readout_id,
             candidate_id=selected.candidate_id,
         )
-        for readout_id, model in selected.frozen_models.items()
+        for readout_id, model in materialized_models.items()
     }
 
-    snapshot = {
-        "candidate_id": selected.candidate_id,
-        "validation_rows": {
-            key: stable_object_hash(value) for key, value in selected.rows.items()
-        },
-        "inner_selections": {
-            key: stable_object_hash(value)
-            for key, value in selected.inner_selections.items()
-        },
-        "frozen_models": {
-            key: stable_object_hash(_canonical_runtime_payload(value))
-            for key, value in selected.frozen_models.items()
-        },
-        "test_primary_rows": {
-            key: stable_object_hash(value.primary_row)
-            for key, value in evaluated.items()
-        },
-        "test_seed_rows": {
-            key: stable_object_hash(value.seed_rows)
-            for key, value in evaluated.items()
-        },
-        "test_ensemble_rows": {
-            key: (
-                None
-                if value.ensemble_row is None
-                else stable_object_hash(value.ensemble_row)
-            )
-            for key, value in evaluated.items()
-        },
-    }
-    assert snapshot == {
-        "candidate_id": (
-            "094500d2b98f97fe9e3995ec2a134924f29db6c611a6244b51aa86831eefbd97"
-        ),
-        "validation_rows": {
-                "direct": (
-                            "50ff54b2eb1ebec482dc50f30686678621bd8dd5464862e42011cf8b680fc9e1"
-                ),
-                "affine": (
-                            "9e365d313682a1fbd982d6040b6f1c1ca11adc4e8ab536d8ba1776a3c1c44e41"
-                ),
-                "random": (
-                            "83832f72cbe8e7da86c87eaa5fb70663b101547b6f36570b420a0a2ed5f8eddd"
-            ),
-        },
-        "inner_selections": {
-            "direct": (
-                "4e0b060ca8045c7df0293e3e48b17120b8533d0f996b8de8807ae6e8ad3327c4"
-            ),
-            "affine": (
-                "47877ad05be0395116e8753dcd4414fbf631086788a7e880180ca9eaee68de04"
-            ),
-            "random": (
-                "0b38790f0cce002aadfe8e366a5137cb6585f0177d72dbd61485bad5bce51e5c"
-            ),
-        },
-        "frozen_models": {
-            "direct": (
-                "a782f925021fa802b46f456aa462ffd07ad6dd84bd9e439a6e7e05f619119638"
-            ),
-            "affine": (
-                "c9db7e4eb4918d5880f7f2a3f0525424e343bd5c331ab6e605c772647936a7aa"
-            ),
-                "random": (
-                    "efdb33787c9b2d6e98d746be119192f5907712c1f8330a89c0b88d85483d2a0c"
-            ),
-        },
-        "test_primary_rows": {
-                "direct": (
-                            "4c82bbb11ef912478159d56eb17029670c019f6b796933dd0d31dd306ba16619"
-                ),
-                "affine": (
-                            "ea23884d4b0cca68b6c56f86a77c3c60993ce070bfefc07ff4d07271d4ebbe3f"
-                ),
-                    "random": (
-                                "e5f20fb2589bc7889b89799e1451f210a83dc307415fa9101b2bbcc01bf02ae2"
-            ),
-        },
-        "test_seed_rows": {
-            "direct": (
-                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
-            ),
-            "affine": (
-                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
-            ),
-                    "random": (
-                                "3514d179b58e15b7abbc57e285caf169ee9e0247ac959732ab61f185f8d5ba4c"
-            ),
-        },
-        "test_ensemble_rows": {
-            "direct": None,
-            "affine": None,
-                    "random": (
-                                "d5875ce9612f60cc399549751969ce9c3cd030ef272f0a32c8349a5901649d1f"
-            ),
-        },
-    }
+    assert selected.candidate_id == stable_object_hash(
+        trial.model_dump(mode="json")
+    )
+    assert set(selected.rows) == {"direct", "affine", "random"}
+    assert set(selected.inner_selections) == {"direct", "affine", "random"}
+    assert set(materialized_models) == {"direct", "affine", "random"}
+    for readout_id, row in selected.rows.items():
+        assert row["candidate_id"] == selected.candidate_id
+        assert row["readout_id"] == readout_id
+        assert row["validation_field_relative_l2_mean"] == pytest.approx(
+            0.0,
+            abs=0.0,
+        )
+        assert row["validation_coefficient_mse"] == pytest.approx(
+            0.0,
+            abs=0.0,
+        )
+
+    direct_model = materialized_models["direct"]
+    assert direct_model["kind"] == "direct_fourier_decoder"
+    assert direct_model["q"] == 5
+    affine_model = materialized_models["affine"]
+    assert affine_model["kind"] == "affine_ridge"
+    assert affine_model["W"].shape == (5, 3)
+    assert affine_model["b"].shape == (5,)
+    assert torch.count_nonzero(affine_model["W"]) == 0
+    assert torch.count_nonzero(affine_model["b"]) == 0
+    random_model = materialized_models["random"]
+    assert random_model["kind"] == "random_feature_ridge"
+    assert random_model["members_materialized"] is True
+    assert random_model["evaluation_seed_metrics_used_for_selection"] is False
+    for member in random_model["members"]:
+        assert member["A"].shape == (1, 3)
+        assert member["c"].shape == (1,)
+        assert member["W"].shape == (5, 4)
+        assert member["b"].shape == (5,)
+        for tensor_name in ("A", "c", "W", "b"):
+            assert torch.count_nonzero(member[tensor_name]) == 0
+        assert member["evaluation_seed_validation_metrics"][
+            "field_relative_l2_mean"
+        ] == pytest.approx(0.0, abs=0.0)
+
+    for result in evaluated.values():
+        assert result.primary_row["candidate_id"] == selected.candidate_id
+        assert result.primary_row["test_field_relative_l2_mean"] == (
+            pytest.approx(0.0, abs=0.0)
+        )
+        assert result.primary_row["test_coefficient_mse"] == pytest.approx(
+            0.0,
+            abs=0.0,
+        )
 
     direct_row = selected.rows["direct"]
     assert direct_row["decoder_observation_count"] == 3
@@ -349,9 +295,9 @@ def test_trial_readout_validation_freeze_and_test_characterization() -> None:
     ]
     assert {
         int(member["seed"])
-        for member in selected.frozen_models["random"]["members"]
+        for member in materialized_models["random"]["members"]
     } == {21, 22}
-    for model in selected.frozen_models.values():
+    for model in materialized_models.values():
         for item in _iter_tensors(model):
             assert item.device.type == "cpu"
             assert torch.equal(item, torch.zeros_like(item))

@@ -49,24 +49,6 @@ REPORTS = ("reports/surrogate_operator_summary.json",)
 DIGITAL_BASELINES = ("digital_baselines/fno1d.json",)
 
 
-def _random_feature_counts(spec: Any) -> dict[str, int]:
-    readouts = list(spec.base_trial.readouts)
-    random_readouts = [
-        readout for readout in readouts
-        if readout.kind == "random_feature_ridge"
-    ]
-    return {
-        "readout_count_per_case": len(readouts),
-        "random_feature_readout_count_per_case": len(random_readouts),
-        "random_feature_selection_seed_count_per_case": sum(
-            len(readout.selection_seeds) for readout in random_readouts
-        ),
-        "random_feature_evaluation_seed_count_per_case": sum(
-            len(readout.evaluation_seeds) for readout in random_readouts
-        ),
-    }
-
-
 def _source_run_status(spec: Any, *, root: Path) -> dict[str, Any]:
     try:
         completed = resolve_verified_completed_run(spec, repo_root=root)
@@ -87,11 +69,37 @@ def _plan_study_read_only(spec: Any, *, root: Path) -> dict[str, Any]:
             spec,
             repo_root=root,
         ).spec
-    plan = plan_case_expansion(planned_spec)
+    dataset_spec = load_dataset_spec(
+        planned_spec.dataset_spec,
+        repo_root=root,
+    )
+    validation_spec = load_validation_spec(
+        dataset_spec.validation_spec,
+        repo_root=root,
+    )
+    plan = plan_case_expansion(
+        planned_spec,
+        canonical_n_train=int(validation_spec.samples.n_train),
+    )
     plan["selection_dependencies"] = dependencies
     plan["scientific_conditions_resolved"] = dependencies[
         "scientific_conditions_resolved"
     ]
+    if (
+        dependencies["status"] != "completed"
+        and dependencies["dependencies"]
+    ):
+        plan["workload"] = {
+            "schema_version": "pol-study-workload-plan-v1",
+            "status": "unresolved_selection_dependency",
+            "counts": None,
+        }
+        for case in plan["cases"]:
+            case["workload"] = {
+                "schema_version": "pol-study-workload-case-v1",
+                "status": "unresolved_selection_dependency",
+                "counts": None,
+            }
     return plan
 
 
@@ -159,10 +167,8 @@ def audit(root: Path) -> dict[str, Any]:
         if spec.profile != "main":
             raise ValueError(f"main study has non-main profile: {relative}")
         plan = _plan_study_read_only(spec, root=root)
-        candidate_upper_bound = sum(
-            int(case["candidate_upper_bound"]) for case in plan["cases"]
-        )
-        counts = _random_feature_counts(spec)
+        workload = plan["workload"]
+        workload_resolved = workload["status"] == "resolved"
         study_rows.append(
             {
                 "path": relative,
@@ -172,17 +178,15 @@ def audit(root: Path) -> dict[str, Any]:
                 "main_marker": True,
                 "profile": spec.profile,
                 "case_count": plan["case_count"],
-                "candidate_upper_bound": candidate_upper_bound,
+                "candidate_upper_bound": (
+                    workload["candidate_trial_upper_bound"]
+                    if workload_resolved
+                    else None
+                ),
                 "planned_cartesian_cell_count": plan[
                     "planned_cartesian_cell_count"
                 ],
-                **counts,
-                "random_feature_evaluation_realization_upper_bound": (
-                    plan["case_count"]
-                    * counts[
-                        "random_feature_evaluation_seed_count_per_case"
-                    ]
-                ),
+                "workload": workload,
                 "upstream_dependency_status": plan[
                     "selection_dependencies"
                 ]["status"],
@@ -318,7 +322,7 @@ def audit(root: Path) -> dict[str, Any]:
         )
 
     return {
-        "schema_version": "pol-production-plan-audit-v2",
+        "schema_version": "pol-production-plan-audit-v3",
         "status": "pass",
         "mode": "read_only_plan",
         "main_execution": False,

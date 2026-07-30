@@ -1916,6 +1916,41 @@ def _verify_report_publication(
     )
     if actual != sorted(figures):
         raise ValueError("reported figures do not match completed artifacts")
+    if summary.get("schema_version") in {
+        "pol-study-run-summary-v15",
+        "pol-study-run-summary-v16",
+    }:
+        reporters = resolved_study.get("reporters")
+        if not isinstance(reporters, list):
+            raise ValueError("resolved study reporter list is invalid")
+        expected_figures: list[str] = []
+        for reporter in reporters:
+            if not isinstance(reporter, Mapping):
+                raise ValueError("resolved study reporter is invalid")
+            filename = reporter.get("filename")
+            formats = reporter.get("formats")
+            if not isinstance(filename, str) or not isinstance(formats, list):
+                raise ValueError("resolved study reporter output is invalid")
+            expected_figures.extend(
+                f"{filename}.{extension}" for extension in formats
+            )
+        expected_figures = sorted(expected_figures)
+        if len(expected_figures) != len(set(expected_figures)):
+            raise ValueError("resolved study reporter outputs collide")
+        if summary.get("expected_figures") != expected_figures:
+            raise ValueError("run summary expected figure list mismatch")
+        if summary.get("configured_reporter_count") != len(reporters):
+            raise ValueError("run summary configured reporter count mismatch")
+        if summary.get("report_expected_file_count") != len(
+            expected_figures
+        ):
+            raise ValueError("run summary expected figure count mismatch")
+        if summary.get("report_generated_file_count") != len(figures):
+            raise ValueError("run summary generated figure count mismatch")
+        if summary.get("report_completion_policy") != (
+            "configured_reporter_exactly_one_file_per_format_v1"
+        ):
+            raise ValueError("run summary reporter completion policy mismatch")
     generate_plots = bool(
         resolved_study.get("execution", {}).get("generate_plots", True)
     )
@@ -1927,6 +1962,16 @@ def _verify_report_publication(
             != "verified_completed_run_read_only"
         ):
             raise ValueError("completed report has invalid source semantics")
+        if (
+            summary.get("schema_version") in {
+                "pol-study-run-summary-v15",
+                "pol-study-run-summary-v16",
+            }
+            and sorted(figures) != expected_figures
+        ):
+            raise ValueError(
+                "completed report does not contain every configured output"
+            )
     elif status == "numerical_complete_report_not_generated":
         if not generate_plots or figures or summary.get("report_source") is not None:
             raise ValueError("pending report state is invalid")
@@ -1950,6 +1995,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12": "pol-study-run-identity-v11",
         "pol-study-run-manifest-v13": "pol-study-run-identity-v12",
         "pol-study-run-manifest-v14": "pol-study-run-identity-v13",
+        "pol-study-run-manifest-v15": "pol-study-run-identity-v14",
+        "pol-study-run-manifest-v16": "pol-study-run-identity-v15",
     }[str(manifest_schema)]
     if identity.get("schema_version") != expected_identity_schema:
         raise ValueError("unsupported legacy study-run identity")
@@ -1980,6 +2027,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12": "pol-study-run-summary-v12",
         "pol-study-run-manifest-v13": "pol-study-run-summary-v13",
         "pol-study-run-manifest-v14": "pol-study-run-summary-v14",
+        "pol-study-run-manifest-v15": "pol-study-run-summary-v15",
+        "pol-study-run-manifest-v16": "pol-study-run-summary-v16",
     }[str(manifest_schema)]
     if summary.get("schema_version") != expected_summary_schema:
         raise ValueError("unsupported study-run summary schema")
@@ -2000,6 +2049,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12",
         "pol-study-run-manifest-v13",
         "pol-study-run-manifest-v14",
+        "pol-study-run-manifest-v15",
+        "pol-study-run-manifest-v16",
     }:
         global_axes = resolved_study.get("global_axes", [])
         variants = resolved_study.get("variants", [])
@@ -2033,11 +2084,15 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         (root / "selection_record.json").read_text(encoding="utf-8")
     )
     expected_selection_schema = (
-        "pol-selection-record-v8"
+        "pol-selection-record-v9"
+        if manifest_schema == "pol-study-run-manifest-v16"
+        else "pol-selection-record-v8"
         if manifest_schema in {
             "pol-study-run-manifest-v12",
             "pol-study-run-manifest-v13",
             "pol-study-run-manifest-v14",
+            "pol-study-run-manifest-v15",
+            "pol-study-run-manifest-v16",
         }
         else "pol-selection-record-v7"
     )
@@ -2061,6 +2116,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12": "pol-frozen-evaluation-plan-v8",
         "pol-study-run-manifest-v13": "pol-frozen-evaluation-plan-v9",
         "pol-study-run-manifest-v14": "pol-frozen-evaluation-plan-v9",
+        "pol-study-run-manifest-v15": "pol-frozen-evaluation-plan-v9",
+        "pol-study-run-manifest-v16": "pol-frozen-evaluation-plan-v10",
     }.get(str(manifest_schema), "pol-frozen-evaluation-plan-v7")
     if plan.get("schema_version") != expected_plan_schema:
         raise ValueError("unsupported frozen evaluation plan schema")
@@ -2101,6 +2158,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         if manifest_schema in {
             "pol-study-run-manifest-v13",
             "pol-study-run-manifest-v14",
+            "pol-study-run-manifest-v15",
+            "pol-study-run-manifest-v16",
         }
         else test_contract_v2
         if manifest_schema == "pol-study-run-manifest-v12"
@@ -2218,6 +2277,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12": "pol-frozen-model-archive-v8",
         "pol-study-run-manifest-v13": "pol-frozen-model-archive-v9",
         "pol-study-run-manifest-v14": "pol-frozen-model-archive-v9",
+        "pol-study-run-manifest-v15": "pol-frozen-model-archive-v9",
+        "pol-study-run-manifest-v16": "pol-frozen-model-archive-v10",
     }.get(str(manifest_schema), "pol-frozen-model-archive-v7")
     if archive.get("schema_version") != expected_archive_schema:
         raise ValueError("unsupported frozen model archive schema")
@@ -2237,6 +2298,28 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         plan=plan,
         archive=archive,
     )
+    if manifest_schema == "pol-study-run-manifest-v16":
+        lifecycle = selection.get("random_feature_lifecycle")
+        if (
+            not isinstance(lifecycle, Mapping)
+            or lifecycle.get("policy")
+            != (
+                "selected_candidate_readout_only_after_validation_"
+                "selection_v1"
+            )
+            or lifecycle.get("materialization_split")
+            != "train_validation_only"
+            or lifecycle.get(
+                "evaluation_seed_metrics_used_for_selection"
+            )
+            is not False
+            or plan.get("random_feature_lifecycle") != lifecycle
+            or archive.get("random_feature_lifecycle") != lifecycle
+            or summary.get("random_feature_lifecycle") != lifecycle
+        ):
+            raise ValueError(
+                "study-run random-feature lifecycle proof is invalid"
+            )
     models = archive.get("models")
     if not isinstance(models, Mapping):
         raise ValueError("frozen model archive models must be an object")
@@ -2258,6 +2341,26 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     }
     if actual != expected or len(actual) != len(models):
         raise ValueError("frozen model archive does not match selected candidates")
+    if manifest_schema == "pol-study-run-manifest-v16":
+        for entry in models.values():
+            model = entry.get("model") if isinstance(entry, Mapping) else None
+            if (
+                isinstance(model, Mapping)
+                and model.get("kind") == "random_feature_ridge"
+                and (
+                    model.get("members_materialized") is not True
+                    or model.get("materialization_split")
+                    != "train_validation_only"
+                    or model.get(
+                        "evaluation_seed_metrics_used_for_selection"
+                    )
+                    is not False
+                    or not isinstance(model.get("members"), list)
+                )
+            ):
+                raise ValueError(
+                    "frozen random-feature model is not fully materialized"
+                )
     entry_by_binding = {
         (
             entry["case_id"],
@@ -2316,6 +2419,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12",
         "pol-study-run-manifest-v13",
         "pol-study-run-manifest-v14",
+        "pol-study-run-manifest-v15",
+        "pol-study-run-manifest-v16",
     }:
         for row in validation_rows:
             _verify_result_row_contract(
@@ -2328,6 +2433,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
                     if manifest_schema in {
                         "pol-study-run-manifest-v13",
                         "pol-study-run-manifest-v14",
+                        "pol-study-run-manifest-v15",
+                        "pol-study-run-manifest-v16",
                     }
                     else "pol-study-result-row-v2"
                     if manifest_schema == "pol-study-run-manifest-v12"
@@ -2350,6 +2457,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
                         if manifest_schema in {
                             "pol-study-run-manifest-v13",
                             "pol-study-run-manifest-v14",
+                            "pol-study-run-manifest-v15",
+                            "pol-study-run-manifest-v16",
                         }
                         else "pol-study-result-row-v2"
                         if manifest_schema == "pol-study-run-manifest-v12"
@@ -2369,6 +2478,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12",
         "pol-study-run-manifest-v13",
         "pol-study-run-manifest-v14",
+        "pol-study-run-manifest-v15",
+        "pol-study-run-manifest-v16",
     }:
         _verify_training_subset_contract(
             resolved_study=resolved_study,
@@ -2417,6 +2528,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12",
         "pol-study-run-manifest-v13",
         "pol-study-run-manifest-v14",
+        "pol-study-run-manifest-v15",
+        "pol-study-run-manifest-v16",
     }:
         for field, rows in (
             ("readout_stability_model_row_count", stability_model_rows),
@@ -2464,6 +2577,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12",
         "pol-study-run-manifest-v13",
         "pol-study-run-manifest-v14",
+        "pol-study-run-manifest-v15",
+        "pol-study-run-manifest-v16",
     }:
         legacy_noise_path = root / "noise_robustness.csv"
         if legacy_noise_path.exists():
@@ -2775,6 +2890,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         if manifest_schema in {
             "pol-study-run-manifest-v13",
             "pol-study-run-manifest-v14",
+            "pol-study-run-manifest-v15",
+            "pol-study-run-manifest-v16",
         }:
             if row.get("test_seed_descriptive_quantiles") != (
                 "[0.25,0.5,0.75]"
@@ -2799,6 +2916,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         if manifest_schema in {
             "pol-study-run-manifest-v13",
             "pol-study-run-manifest-v14",
+            "pol-study-run-manifest-v15",
+            "pol-study-run-manifest-v16",
         }:
             member_by_seed = {
                 int(member["seed"]): member for member in members
@@ -2926,6 +3045,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         if manifest_schema in {
             "pol-study-run-manifest-v13",
             "pol-study-run-manifest-v14",
+            "pol-study-run-manifest-v15",
+            "pol-study-run-manifest-v16",
         }:
             expected_member_hashes = [
                 random_feature_member_result_fields(model, member)[
@@ -2953,6 +3074,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
                     "pol-study-run-manifest-v12",
                     "pol-study-run-manifest-v13",
                     "pol-study-run-manifest-v14",
+                    "pol-study-run-manifest-v15",
+                    "pol-study-run-manifest-v16",
                 }
                 or "representation_floor" not in key
             )
@@ -2972,7 +3095,11 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         except (TypeError, ValueError) as exc:
             raise ValueError("ensemble metric is not numeric") from exc
 
-    if manifest_schema == "pol-study-run-manifest-v14":
+    if manifest_schema in {
+        "pol-study-run-manifest-v14",
+        "pol-study-run-manifest-v15",
+        "pol-study-run-manifest-v16",
+    }:
         _verify_prediction_capture_artifact(
             root,
             resolved_study=resolved_study,
@@ -3000,6 +3127,8 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         "pol-study-run-manifest-v12",
         "pol-study-run-manifest-v13",
         "pol-study-run-manifest-v14",
+        "pol-study-run-manifest-v15",
+        "pol-study-run-manifest-v16",
     }:
         expected_comparison = build_selected_comparison_rows(
             validation_rows=validation_rows,
@@ -3022,6 +3151,11 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     ]
     required = (
         "selection_complete",
+        *(
+            ("evaluation_members_materialized",)
+            if manifest_schema == "pol-study-run-manifest-v16"
+            else ()
+        ),
         "convergence_complete",
         "freeze_written",
         "freeze_read_back",
@@ -3030,8 +3164,15 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     )
     if any(name not in names for name in required):
         raise ValueError("study-run event log is incomplete")
+    materialization_index = (
+        names.index("evaluation_members_materialized")
+        if manifest_schema == "pol-study-run-manifest-v16"
+        else names.index("selection_complete")
+    )
     if not (
         names.index("selection_complete")
+        <= materialization_index
+        < names.index("convergence_complete")
         < names.index("freeze_written")
         < names.index("freeze_read_back")
         < names.index("first_test_state_solve")
@@ -3043,6 +3184,11 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
     for event in events:
         if not isinstance(event, Mapping):
             raise ValueError("study-run event must be an object")
+        if (
+            manifest_schema == "pol-study-run-manifest-v16"
+            and event.get("schema_version") != "pol-study-event-v1"
+        ):
+            raise ValueError("study-run event schema is invalid")
         if event.get("event") in {
             "freeze_written",
             "freeze_read_back",
@@ -3051,6 +3197,18 @@ def _verify_study_semantics(root: Path, manifest: Mapping[str, Any]) -> None:
         } and event.get("plan_content_hash") != stored_plan_hash:
             raise ValueError(
                 "study-run event has the wrong frozen-plan binding"
+            )
+        if (
+            manifest_schema == "pol-study-run-manifest-v16"
+            and event.get("event") == "evaluation_members_materialized"
+            and (
+                event.get("selection_record_hash") != selection_hash
+                or event.get("random_feature_lifecycle")
+                != selection["random_feature_lifecycle"]
+            )
+        ):
+            raise ValueError(
+                "materialization event has the wrong selection binding"
             )
 
 
@@ -3070,6 +3228,8 @@ def verify_study_run(path: Path | str) -> dict[str, Any]:
         "pol-study-run-manifest-v12",
         "pol-study-run-manifest-v13",
         "pol-study-run-manifest-v14",
+        "pol-study-run-manifest-v15",
+        "pol-study-run-manifest-v16",
     }:
         raise ValueError("unsupported study-run manifest")
     expected_records = manifest.get("files")

@@ -79,10 +79,17 @@ def build_fno(
     n_tar: int,
     dtype: torch.dtype,
     seed: int,
+    coordinate_channel: str,
+    domain_length: float,
 ) -> FNO1d:
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(int(seed))
-        model = FNO1d(candidate, n_tar=n_tar).to(
+        model = FNO1d(
+            candidate,
+            n_tar=n_tar,
+            coordinate_channel=coordinate_channel,
+            domain_length=domain_length,
+        ).to(
             device=torch.device("cpu"),
             dtype=dtype,
         )
@@ -96,11 +103,18 @@ def load_fno_checkpoint(
     dtype: torch.dtype,
     state_dict: Mapping[str, torch.Tensor],
     expected_hash: str,
+    coordinate_channel: str,
+    domain_length: float,
 ) -> FNO1d:
     actual_hash = state_dict_content_hash(state_dict)
     if actual_hash != expected_hash:
         raise ValueError("frozen FNO checkpoint content hash mismatch")
-    model = FNO1d(candidate, n_tar=n_tar).to(
+    model = FNO1d(
+        candidate,
+        n_tar=n_tar,
+        coordinate_channel=coordinate_channel,
+        domain_length=domain_length,
+    ).to(
         device=torch.device("cpu"),
         dtype=dtype,
     )
@@ -192,6 +206,7 @@ def train_one_seed(
     validation_view: FiniteDataView,
     normalization: Mapping[str, object],
     domain_length: float,
+    coordinate_channel: str,
 ) -> TrainingOutcome:
     """Train for a fixed budget and select a checkpoint using validation only."""
     model = build_fno(
@@ -199,6 +214,8 @@ def train_one_seed(
         n_tar=train_view.n_tar,
         dtype=train_view.inputs.dtype,
         seed=int(seed),
+        coordinate_channel=coordinate_channel,
+        domain_length=domain_length,
     )
     count = parameter_count(model)
     optimizer = torch.optim.Adam(

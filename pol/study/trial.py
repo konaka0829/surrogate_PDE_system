@@ -25,6 +25,7 @@ from .readouts import (
     ReadoutFitInputs,
     fit_readout,
     frozen_readout_diagnostic,
+    materialize_random_feature_readout,
     predict_frozen,
 )
 from .training_subsets import resolve_training_subset
@@ -53,6 +54,18 @@ class TrialEngine:
         self.canonical_n_train = int(dataset.train_ids.numel())
         self._finite_cache: dict[tuple[str, int, int], FiniteDataView] = {}
         self._candidate_cache: dict[str, CandidateEvaluation] = {}
+        self._selection_fit_inputs: dict[str, ReadoutFitInputs] = {}
+        self._materialized_readouts: dict[
+            tuple[str, str],
+            dict[str, Any],
+        ] = {}
+        self.materialization_stats = {
+            "selected_readout_materialization_request_count": 0,
+            "selected_readout_materialization_cache_hit_count": 0,
+            "selected_readout_model_count": 0,
+            "selected_random_feature_model_count": 0,
+            "selected_candidate_evaluation_member_fit_count": 0,
+        }
         verify_execution_device_policy(
             dataset.__dict__,
             boundary="trial-engine dataset",
@@ -158,8 +171,9 @@ class TrialEngine:
             domain_length=self.dataset.domain_length,
             selection_metric=self.study.selection.metric,
         )
+        self._selection_fit_inputs[candidate_id] = fit_inputs
         rows: dict[str, dict[str, Any]] = {}
-        frozen: dict[str, dict[str, Any]] = {}
+        selection_models: dict[str, dict[str, Any]] = {}
         selections: dict[str, dict[str, Any]] = {}
         for readout in trial.readouts:
             fitted = fit_readout(readout, fit_inputs)
@@ -168,26 +182,92 @@ class TrialEngine:
                 readout_id=readout.id,
                 readout_kind=readout.kind,
                 trial=trial,
-                frozen_model=fitted.frozen_model,
+                frozen_model=fitted.selection_model,
                 readout_values=fitted.validation_values,
                 inner_selection=fitted.inner_selection,
                 floor_metrics=floor,
                 training_subset=training_subset,
             )
             rows[readout.id] = validation.row
-            frozen[readout.id] = fitted.frozen_model
+            selection_models[readout.id] = fitted.selection_model
             selections[readout.id] = validation.inner_selection
         result = CandidateEvaluation(
             candidate_id=candidate_id,
             trial=trial,
             rows=rows,
-            frozen_models=frozen,
+            selection_models=selection_models,
             inner_selections=selections,
             feature_cache_id=state.cache_id,
             training_subset=training_subset,
         )
         self._candidate_cache[candidate_id] = result
         return result
+
+    def materialize_selected_readout(
+        self,
+        evaluation: CandidateEvaluation,
+        *,
+        readout_id: str,
+    ) -> dict[str, Any]:
+        """Materialize one selected readout using train/validation data only."""
+        key = (evaluation.candidate_id, readout_id)
+        self.materialization_stats[
+            "selected_readout_materialization_request_count"
+        ] += 1
+        cached = self._materialized_readouts.get(key)
+        if cached is not None:
+            self.materialization_stats[
+                "selected_readout_materialization_cache_hit_count"
+            ] += 1
+            return cached
+        model = evaluation.selection_models.get(readout_id)
+        if not isinstance(model, Mapping):
+            raise ValueError("selected readout has no selection model")
+        if model.get("kind") != "random_feature_ridge":
+            materialized = dict(model)
+        else:
+            if bool(
+                torch.isin(
+                    self.selection_ids,
+                    self.dataset.test_ids.to(torch.long),
+                ).any()
+            ):
+                raise ValueError(
+                    "random-feature materialization selection IDs include test IDs"
+                )
+            readout = next(
+                (
+                    item
+                    for item in evaluation.trial.readouts
+                    if item.id == readout_id
+                ),
+                None,
+            )
+            if readout is None or readout.kind != "random_feature_ridge":
+                raise ValueError(
+                    "selected random-feature recipe has no matching readout"
+                )
+            inputs = self._selection_fit_inputs.get(
+                evaluation.candidate_id
+            )
+            if inputs is None:
+                raise ValueError(
+                    "selected random-feature recipe has no cached fit inputs"
+                )
+            materialized = materialize_random_feature_readout(
+                readout,
+                inputs,
+                model,
+            )
+            self.materialization_stats[
+                "selected_random_feature_model_count"
+            ] += 1
+            self.materialization_stats[
+                "selected_candidate_evaluation_member_fit_count"
+            ] += len(materialized["members"])
+        self.materialization_stats["selected_readout_model_count"] += 1
+        self._materialized_readouts[key] = materialized
+        return materialized
 
     def evaluate_test(
         self,

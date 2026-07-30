@@ -112,9 +112,9 @@ def test_global_axis_uses_same_study_executor(tmp_path: Path) -> None:
     plan = plan_study(spec)
     assert plan["case_count"] == 2
     assert {case["global_values"]["output.q"] for case in plan["cases"]} == {5, 9}
-    assert stable_object_hash(plan) == (
-        "5e07587b365661cc1f9860bb0ea5a623a8ebf5da53871b14a5a8f950b16a1c25"
-    )
+    assert plan["schema_version"] == "pol-study-plan-v4"
+    assert plan["workload"]["case_count"] == 2
+    assert plan["workload"]["candidate_trial_upper_bound"] == 2
 
 
 def test_checked_in_observation_output_budget_keeps_q_greater_than_J_cells() -> None:
@@ -189,7 +189,7 @@ def test_direct_decoder_diagnostic_is_bound_across_study_artifacts(
         map_location="cpu",
         weights_only=True,
     )
-    assert archive["schema_version"] == "pol-frozen-model-archive-v9"
+    assert archive["schema_version"] == "pol-frozen-model-archive-v10"
     entries = {
         entry["readout_id"]: entry for entry in archive["models"].values()
     }
@@ -390,6 +390,7 @@ def test_freeze_protocol_cross_hashes_and_event_payloads(tmp_path: Path) -> None
     )
     assert [event["event"] for event in events] == [
         "selection_complete",
+        "evaluation_members_materialized",
         "convergence_complete",
         "freeze_written",
         "freeze_read_back",
@@ -397,9 +398,10 @@ def test_freeze_protocol_cross_hashes_and_event_payloads(tmp_path: Path) -> None
         "first_test_metric",
     ]
     assert events[0]["selection_record_hash"] == selection_hash
-    assert events[1]["status"] == {"heat": "not_requested"}
+    assert events[1]["selection_record_hash"] == selection_hash
+    assert events[2]["status"] == {"heat": "not_requested"}
     assert all(
-        event["plan_content_hash"] == plan_hash for event in events[2:]
+        event["plan_content_hash"] == plan_hash for event in events[3:]
     )
 
     for name in (

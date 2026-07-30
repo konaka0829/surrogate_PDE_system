@@ -24,6 +24,24 @@ The refactor replaces that organization as follows.
 | experiment-specific state cache | content-addressed `feature_states` artifact |
 | experiment-specific artifact versions | semantic artifact-kind schemas |
 
+## Current semantic phase responsibilities
+
+Phase labels below summarize the current research workflow; they are not
+publication-label or figure-number dispatch:
+
+| Phase | Current semantic implementation |
+|---|---|
+| Phase 3 | coordinate search, complete parameter/time landscape, representative-condition selection, and verified downstream binding |
+| Phase 4 | distinct `J x q` and `n_tar x n_sur` budget studies |
+| Phase 5 | shared-budget static-versus-dynamic feature comparison |
+| Phase 6 | readout stability/noise, nested-prefix learning curves, and independent random-feature seed statistics |
+| Phase 7 | predeclared prediction capture plus read-only single-run and cross-run reporting |
+
+The optional FNO1d implementation sits outside these mandatory physical-study
+phases. It is an independent digital adapter sharing the validated finite
+dataset/split/metric contract; it is not a physical readout. Its checked-in
+main profile has not been executed.
+
 ## What remains study-specific
 
 The `studies/` directory records declarative combinations needed to answer
@@ -99,6 +117,15 @@ a validation-selected feature condition declares `completed_study_selection`
 with a source study spec, source variant/readout, and allowlisted import paths.
 `pol-study-v2` runs do not contain this provenance and are rejected rather than
 silently accepted as selection-bound results.
+
+Active package `0.2.29` writes study plan `v4`, identity `v15`, selection `v9`,
+frozen archive/plan `v10`, result row `v3`, and manifest/summary `v16`.
+Read-only compatibility with older completed selection sources is migration
+support, not an active-write version. Scientific JSON is finite-only, artifact
+components are path-safe, configured reporters fail closed, and selected
+random-feature evaluation members are materialized only after validation
+selection. The compact historical release table is in
+`docs/current_implementation_inventory.md`.
 
 Cross-run reporting is intentionally not another study runner. Report sources
 are resolved from strict study specifications to their exact existing

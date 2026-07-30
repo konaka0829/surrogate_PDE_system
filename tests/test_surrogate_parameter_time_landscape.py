@@ -61,7 +61,7 @@ class _SelectionStub:
             candidate_id=candidate_id,
             trial=trial,
             rows=rows,
-            frozen_models={
+            selection_models={
                 readout.id: {"kind": readout.kind}
                 for readout in trial.readouts
             },
@@ -160,12 +160,44 @@ def test_main_landscape_is_only_planned_and_uses_validated_solver_conditions(
         repo_root / "studies/surrogate_parameter_time_landscape.json",
         repo_root=repo_root,
     )
-    plan = plan_study(spec)
+    dataset = load_dataset_spec(spec.dataset_spec, repo_root=repo_root)
+    validation = load_validation_spec(
+        dataset.validation_spec,
+        repo_root=repo_root,
+    )
+    plan = plan_study(
+        spec,
+        canonical_n_train=int(validation.samples.n_train),
+    )
     assert spec.profile == "main"
     assert plan["planned_cartesian_cell_count"] == 75
     assert all(
         case["planned_cartesian_cell_count"] == 25
         for case in plan["cases"]
+    )
+    workload = plan["workload"]
+    random = workload["random_feature"]
+    assert workload["status"] == "resolved"
+    assert workload["candidate_trial_upper_bound"] == 75
+    assert workload["feature_state_solve_upper_bound"] == 75
+    assert workload["configured_readout_count"] == 9
+    assert workload["affine"] == {
+        "zeta_fit_count": 450,
+        "zero_zeta_svd_count": 75,
+    }
+    assert random["unique_random_map_count"] == 6_750
+    assert random["train_validation_lift_count"] == 13_500
+    assert random["ridge_fit_count"] == 40_500
+    assert (
+        random["selected_candidate_evaluation_member_fit_count"] == 30
+    )
+    assert random["eager_legacy_evaluation_member_fit_count"] == 750
+    assert random["lazy_total_ridge_fit_count"] == 40_530
+    assert random["eager_legacy_total_ridge_fit_count"] == 41_250
+    assert random["maximum_lifted_dimension"] == 768
+    assert random["maximum_target_dimension"] == 257
+    assert random["maximum_training_sample_count"] == int(
+        validation.samples.n_train
     )
 
     variants = {variant.id: variant for variant in spec.variants}
@@ -188,6 +220,47 @@ def test_main_landscape_is_only_planned_and_uses_validated_solver_conditions(
         "kind": "heat",
         "nu": 0.01,
     }
+
+
+def test_smoke_landscape_workload_matches_declared_formula() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = load_study_spec(
+        repo_root
+        / "studies/surrogate_parameter_time_landscape_smoke.json",
+        repo_root=repo_root,
+    )
+    dataset = load_dataset_spec(spec.dataset_spec, repo_root=repo_root)
+    validation = load_validation_spec(
+        dataset.validation_spec,
+        repo_root=repo_root,
+    )
+    plan = plan_study(
+        spec,
+        canonical_n_train=int(validation.samples.n_train),
+    )
+    workload = plan["workload"]
+    random = workload["random_feature"]
+    candidate_count = 3 * 2 * 2
+    structure_count = 1 * 1 * 1
+    selection_seed_count = 2
+    zeta_count = 2
+    evaluation_seed_count = 2
+    assert workload["candidate_trial_upper_bound"] == candidate_count
+    assert random["unique_random_map_count"] == (
+        candidate_count * structure_count * selection_seed_count
+    )
+    assert random["ridge_fit_count"] == (
+        candidate_count
+        * structure_count
+        * selection_seed_count
+        * zeta_count
+    )
+    assert random["selected_candidate_evaluation_member_fit_count"] == (
+        3 * evaluation_seed_count
+    )
+    assert random["eager_legacy_evaluation_member_fit_count"] == (
+        candidate_count * evaluation_seed_count
+    )
 
     smoke_script = (repo_root / "scripts/run_smoke.sh").read_text(
         encoding="utf-8"

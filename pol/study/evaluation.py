@@ -34,7 +34,7 @@ class CandidateEvaluation:
     candidate_id: str
     trial: TrialSpec
     rows: dict[str, dict[str, Any]]
-    frozen_models: dict[str, dict[str, Any]]
+    selection_models: dict[str, dict[str, Any]]
     inner_selections: dict[str, dict[str, Any]]
     feature_cache_id: str
     training_subset: dict[str, Any] = field(default_factory=dict)
@@ -166,11 +166,17 @@ def selected_readout_parameter_fields(
         }
     if kind == "random_feature_ridge":
         members = model.get("members")
-        if not isinstance(members, list):
+        if isinstance(members, list):
+            seeds = [int(member["seed"]) for member in members]
+        elif (
+            model.get("members_materialized") is False
+            and isinstance(model.get("evaluation_seeds"), list)
+        ):
+            seeds = [int(seed) for seed in model["evaluation_seeds"]]
+        else:
             raise ValueError(
-                "frozen random-feature model members must be a list"
+                "random-feature selection model has no evaluation seeds"
             )
-        seeds = [int(member["seed"]) for member in members]
         return {
             "selected_ridge_zeta": float(model["zeta"]),
             "selected_random_feature_activation": str(model["activation"]),

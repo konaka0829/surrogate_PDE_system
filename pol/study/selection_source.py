@@ -19,6 +19,7 @@ from pol.config.models import (
     TrialSpec,
 )
 from pol.data.dataset import dataset_reference, load_dataset
+from pol.runtime.artifacts import manifest_records
 from pol.runtime.hashing import stable_object_hash
 from pol.runtime.io import file_sha256
 from pol.validation.binding import evaluate_dataset_binding
@@ -50,6 +51,29 @@ class VerifiedCompletedRun:
     scientific_identity_hash: str
     identity: dict[str, Any]
     dataset: Any
+
+
+@dataclass(frozen=True)
+class FrozenSourceBoundary:
+    selection: dict[str, Any]
+    selection_hash: str
+    plan: dict[str, Any]
+    plan_hash: str
+    archive: dict[str, Any]
+    archive_hash: str
+
+
+_SUPPORTED_STUDY_MANIFESTS = {
+    "pol-study-run-manifest-v8",
+    "pol-study-run-manifest-v9",
+    "pol-study-run-manifest-v10",
+    "pol-study-run-manifest-v11",
+    "pol-study-run-manifest-v12",
+    "pol-study-run-manifest-v13",
+    "pol-study-run-manifest-v14",
+    "pol-study-run-manifest-v15",
+    "pol-study-run-manifest-v16",
+}
 
 
 def _dependency_key(spec: StudySpec) -> str:
@@ -99,11 +123,76 @@ def _load_existing_dataset(spec: StudySpec, *, repo_root: Path) -> Any:
         ) from exc
 
 
+def _preflight_study_run(
+    root: Path,
+    *,
+    expected_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Verify exact source bytes and frozen non-test records without parsing tests."""
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"not a safe study run directory: {root}")
+    manifest_path = root / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("study run has no regular manifest")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema_version") not in _SUPPORTED_STUDY_MANIFESTS:
+        raise ValueError("unsupported study-run manifest")
+    if manifest.get("identity") != dict(expected_identity):
+        raise ValueError(
+            "study-run manifest does not match the expected identity"
+        )
+    records = manifest.get("files")
+    if not isinstance(records, list):
+        raise ValueError("study-run files must be a list")
+    names: list[str] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ValueError("study-run manifest record must be an object")
+        name = record.get("relative_path")
+        if (
+            not isinstance(name, str)
+            or Path(name).is_absolute()
+            or Path(name).as_posix() != name
+            or Path(name).name == "manifest.json"
+            or any(part in {"", ".", ".."} for part in Path(name).parts)
+        ):
+            raise ValueError("study-run manifest has an unsafe file name")
+        names.append(name)
+    if len(names) != len(set(names)):
+        raise ValueError("study-run manifest has duplicate file records")
+    actual_names: list[str] = []
+    for item in root.rglob("*"):
+        if item.is_symlink():
+            raise ValueError(f"study run contains a symlink: {item}")
+        if item.is_file() and item.name != "manifest.json":
+            actual_names.append(item.relative_to(root).as_posix())
+    if sorted(actual_names) != sorted(names):
+        raise ValueError("study-run file tree differs from manifest")
+    if manifest_records(root, names) != records:
+        raise ValueError("study-run bytes differ from manifest")
+    resolved = json.loads(
+        (root / "resolved_study.json").read_text(encoding="utf-8")
+    )
+    if resolved != expected_identity.get("study"):
+        raise ValueError("resolved study disagrees with expected identity")
+    summary = json.loads(
+        (root / "run_summary.json").read_text(encoding="utf-8")
+    )
+    if (
+        summary.get("status") != "pass"
+        or summary.get("run_hash")
+        != stable_object_hash(dict(expected_identity))
+    ):
+        raise ValueError("study-run summary is not a completed expected run")
+    return manifest
+
+
 def _verify_completed_run(
     spec: StudySpec,
     *,
     repo_root: Path,
     provenance_by_variant: Mapping[str, Mapping[str, Any]],
+    full_verify: bool = True,
 ) -> VerifiedCompletedRun:
     dataset = _load_existing_dataset(spec, repo_root=repo_root)
     verify_selection_dataset_bindings(provenance_by_variant, dataset=dataset)
@@ -122,7 +211,14 @@ def _verify_completed_run(
             f"run_hash={run_hash} at {run_path}"
         )
     try:
-        manifest = verify_study_run(run_path)
+        manifest = (
+            verify_study_run(run_path)
+            if full_verify
+            else _preflight_study_run(
+                run_path,
+                expected_identity=identity,
+            )
+        )
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
         raise SelectionDependencyError(
             "completed-study selection dependency failed verification: "
@@ -133,13 +229,18 @@ def _verify_completed_run(
             "completed-study selection dependency does not match its expected "
             "content-addressed identity"
         )
-    return VerifiedCompletedRun(
+    completed = VerifiedCompletedRun(
         path=run_path,
         run_hash=run_hash,
         scientific_identity_hash=stable_object_hash(identity["study"]),
         identity=identity,
         dataset=dataset,
     )
+    if not full_verify:
+        # This validates selection, frozen plan, and frozen model bytes without
+        # opening any test result table.
+        _read_frozen_source_payload(completed)
+    return completed
 
 
 def _read_frozen_source_payload(
@@ -152,6 +253,7 @@ def _read_frozen_source_payload(
     if selection.get("schema_version") not in {
         "pol-selection-record-v7",
         "pol-selection-record-v8",
+        "pol-selection-record-v9",
     }:
         raise SelectionDependencyError(
             "selection source uses an unsupported selection-record schema"
@@ -171,6 +273,7 @@ def _read_frozen_source_payload(
         "pol-frozen-evaluation-plan-v7",
         "pol-frozen-evaluation-plan-v8",
         "pol-frozen-evaluation-plan-v9",
+        "pol-frozen-evaluation-plan-v10",
     }:
         raise SelectionDependencyError(
             "selection source uses an unsupported frozen-plan schema"
@@ -216,6 +319,7 @@ def _read_frozen_source_payload(
         "pol-frozen-model-archive-v7",
         "pol-frozen-model-archive-v8",
         "pol-frozen-model-archive-v9",
+        "pol-frozen-model-archive-v10",
     }:
         raise SelectionDependencyError(
             "selection source uses an unsupported frozen-model schema"
@@ -231,6 +335,23 @@ def _read_frozen_source_payload(
         plan_hash,
         archive,
         archive_hash,
+    )
+
+
+def read_frozen_source_boundary(
+    completed: VerifiedCompletedRun,
+) -> FrozenSourceBoundary:
+    """Read back the validated selection/freeze boundary of a source run."""
+    selection, selection_hash, plan, plan_hash, archive, archive_hash = (
+        _read_frozen_source_payload(completed)
+    )
+    return FrozenSourceBoundary(
+        selection=selection,
+        selection_hash=selection_hash,
+        plan=plan,
+        plan_hash=plan_hash,
+        archive=archive,
+        archive_hash=archive_hash,
     )
 
 
@@ -480,6 +601,7 @@ def resolve_selection_bindings(
     *,
     repo_root: Path,
     _stack: tuple[str, ...] = (),
+    _full_verify: bool = True,
 ) -> ResolvedSelectionBindings:
     current_key = _dependency_key(spec)
     if current_key in _stack:
@@ -513,6 +635,7 @@ def resolve_selection_bindings(
             source_spec,
             repo_root=repo_root,
             _stack=stack,
+            _full_verify=_full_verify,
         )
         completed = _verify_completed_run(
             resolved_source.spec,
@@ -520,6 +643,7 @@ def resolve_selection_bindings(
             provenance_by_variant=(
                 resolved_source.provenance_by_variant
             ),
+            full_verify=_full_verify,
         )
         provenance_by_variant[variant.id] = _extract_source_provenance(
             completed,
@@ -711,4 +835,23 @@ def resolve_verified_completed_run(
         resolved.spec,
         repo_root=repo_root,
         provenance_by_variant=resolved.provenance_by_variant,
+    )
+
+
+def resolve_preflight_completed_run(
+    spec: StudySpec,
+    *,
+    repo_root: Path,
+) -> VerifiedCompletedRun:
+    """Resolve exact source bytes and frozen non-test state without test parsing."""
+    resolved = resolve_selection_bindings(
+        spec,
+        repo_root=repo_root,
+        _full_verify=False,
+    )
+    return _verify_completed_run(
+        resolved.spec,
+        repo_root=repo_root,
+        provenance_by_variant=resolved.provenance_by_variant,
+        full_verify=False,
     )

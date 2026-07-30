@@ -1,14 +1,14 @@
-# Known scientific risks through the optional digital baseline
+# Known scientific risks for the current release
 
 Status terms in this document have strict meanings:
 
 - **confirmed**: the behavior follows directly from the current code;
-- **suspected**: there is code evidence for concern, but the end-to-end effect
-  has not been demonstrated;
-- **not yet verified**: the required historical result or runtime evidence is
-  absent.
 - **resolved**: the earlier behavior is retained for history, but the current
-  implementation and focused tests enforce the stated correction.
+  implementation and focused tests enforce the stated correction;
+- **not yet verified**: the required main result, historical mapping, or
+  runtime evidence is absent;
+- **residual caveat**: a stated limitation remains after a correction and must
+  bound the claims made from it.
 
 Resolved items remain recorded with their resolution and residual caveats.
 
@@ -18,7 +18,7 @@ Resolved items remain recorded with their resolution and residual caveats.
 
 Resolution:
 
-- `pol/study/trial.py::predict_frozen`
+- `pol/study/readouts.py::predict_frozen`
 - `pol/study/trial.py::TrialEngine.evaluate_test`
 - `pol/study/runner.py::run_study` and `verify_study_run`
 
@@ -422,10 +422,10 @@ Only invalid input handling was tightened for empty spatial axes,
 non-floating values, and invalid domain lengths. Validation identity and
 certificate are `v12`, the foundation contract is `v8`, the field-quadrature
 check is `pol-field-quadrature-check-v1`. That contract was recorded by
-package version `0.2.13`; `0.2.14` separates the analytic
-heat-diagnostic/run-table contract, `0.2.15` separates the Cartesian landscape
-and representative-selection contract, and the current `0.2.16` separates
-completed-source-bound downstream identities.
+package version `0.2.13`; the subsequent `0.2.14`--`0.2.16` releases
+historically separated the heat-diagnostic/run-table, Cartesian-landscape,
+and completed-source-bound downstream identities. The active release is
+listed separately in the implementation inventory.
 
 **Residual caveat:** the fixed synthetic suite certifies the mathematical
 quadrature convention and its stated mode band. It is not a substitute for
@@ -551,17 +551,20 @@ The former `run_main.sh` chained expensive validation, dataset, and study
 commands after a timed warning and omitted several mandatory later studies.
 It has been replaced by explicit one-stage invocations guarded by
 `POL_CONFIRM_MAIN=YES`; no all stage exists. The read-only
-`pol-production-plan-audit-v2` script strict-parses and pure-plans all current
+`pol-production-plan-audit-v3` script strict-parses and pure-plans all current
 main validations, datasets, studies, the digital baseline, and the cross-run
-report, including case/candidate/model/seed counts and missing dependency
-state. The production
+report, including map/lift/ridge/SVD and selected-only evaluation-member
+operation counts, shape budgets, and missing dependency state. Unresolved
+selection-bound studies expose null counts rather than placeholder scientific
+conditions. The production
 runbook defines the landscape selection checkpoint, verification, reuse,
 interruption, backup, plots-only, report, and failure-recovery procedures.
 
 **Residual caveat:** the procedures and counts are validated by parsing,
 focused tests, and smoke execution. They are not evidence of main runtime,
 capacity, numerical outcomes, or successful production recovery on a
-different host.
+different host. Human review of CPU memory, wall time, and storage recorded
+from the audit remains mandatory before main execution.
 
 ## R14. A digital neural operator could be compared through an unfair or leaky path
 
@@ -574,6 +577,11 @@ shares the exact validated dataset, canonical split, `q` interface, and
 reference/data metric implementation with a verified physical baseline source.
 The physical `StudyRunner` does not import the adapter.
 
+The checked periodic baseline has no absolute coordinate channel and is
+circular-shift equivariant. An explicit periodic sin/cos option is available
+for experiments that intentionally supply absolute periodic position; the
+legacy discontinuous ramp is rejected.
+
 Architecture candidates and epoch checkpoints use training/validation only.
 Selection and evaluation training seeds are disjoint. The selection record,
 evaluation-seed checkpoint archive, and frozen plan are written, byte/tensor
@@ -582,10 +590,20 @@ results aggregate independently trained evaluation-seed metrics with
 Bessel-corrected standard deviation and a Student-t 95% interval; prediction
 averaging is a separately labeled ensemble.
 
+Physical-source preflight verifies the manifest, dataset binding,
+validation/selection/frozen artifacts, and predeclared row coordinates without
+parsing `test_metrics.csv`. Physical test rows are parsed only after the
+digital freeze/read-back boundary; the source is then fully reverified and
+the unchanged preflight/post-freeze hashes are event-bound.
+
 The predeclared fairness table binds dataset/split hashes, input/output
-dimensions, parameter counts, validation selection values, separate
-reference/data errors and floors, seed statistics, source/condition hashes,
-and distinct physical/digital inference paths. Digital training timing is
+dimensions, validation selection values, separate reference/data errors and
+floors, seed statistics, source/condition hashes, and distinct
+physical/digital inference paths. Parameter counts use real scalars and state
+trainable, fixed-random, and total stored counts for one independent
+realization. Random-feature totals include the skip-connected `qJ` weights;
+all-realization frozen storage is a separate field rather than a model-capacity
+claim. Counts are reconstructed from frozen tensors. Digital training timing is
 recorded, but energy is unmeasured and physical/digital timing or energy
 comparison is explicitly prohibited without a common measurement protocol.
 Missing/tampered physical sources and checkpoint tampering fail verification;
@@ -596,6 +614,77 @@ and supports no performance conclusion. The checked-in main CPU budget
 (two candidates, five selection seeds, ten evaluation seeds, 100 epochs/model,
 64,000 optimizer steps at most) is strict-planned only. No main FNO result,
 hardware-normalized timing, energy measurement, or DeepONet result exists.
+
+## R15. Non-finite scientific configuration could cross the parse boundary
+
+**Status: resolved at the shared parser/model boundary.**
+
+Scientific file JSON and CLI `--set` values use one strict JSON loader that
+rejects `NaN`, `Infinity`, and `-Infinity`. Shared strict Pydantic models set
+`allow_inf_nan=false`, and the recursive JSON-value validator covers nested
+sweep values, variant/source overrides, reporter coordinates, optimizer
+settings, tolerances, and digital training values while treating booleans as
+booleans. Focused tests show failure before artifact creation, PDE/feature
+solves, training, or test-source access.
+
+**Residual caveat:** finite input is only the first validation layer.
+Model-specific positivity, ordering, shape, and stability conditions remain
+separate scientific checks.
+
+## R16. Output components or reporters could escape, overwrite, or succeed empty
+
+**Status: resolved at strict configuration, transaction, and completed-run
+verification boundaries.**
+
+Project-owned directory components and reporter basenames use the documented
+ASCII component policy. Extensions are derived from a nonempty unique format
+list, so different declarations cannot collapse onto one output. A configured
+reporter must produce exactly its declared files; empty, duplicate, missing,
+or unexpected results fail the reporting transaction. Summary and manifest
+verification bind the configured and generated file sets. Coverage is in
+`tests/test_artifact_names_and_reporters.py`.
+
+**Residual caveat:** user-selected storage roots are intentionally ordinary
+paths under operator control. The component policy does not make an
+untrusted storage root safe.
+
+## R17. Random-feature evaluation members were fitted for rejected candidates
+
+**Status: resolved in package `0.2.29` at selection, freeze, and planning
+boundaries.**
+
+Candidate evaluation now stores a selected structural/ridge recipe. Evaluation
+seeds are materialized from train/validation data only for the final selected
+case/readout, before convergence/freeze persistence and before test access.
+Seed validation metrics are explicitly not selection inputs. Random maps and
+train/validation lifts are cached across ridge values. Selection/frozen/event
+artifacts bind this lifecycle, and `pol-production-plan-audit-v3` reports
+selected-only versus legacy eager fits plus map/lift/ridge/SVD/shape budgets.
+Focused counter and equivalence coverage is in
+`tests/test_random_feature_lazy.py`.
+
+**Residual caveat:** the plan is an operation upper bound, not a runtime or
+memory measurement. Unresolved selection-bound studies deliberately have null
+counts. Human capacity review remains a hard gate before any main execution.
+
+## R18. Backend-dependent numerical byte hashes could masquerade as portable truth
+
+**Status: resolved for the audited test suite.**
+
+GRF/FFT regression coverage now constructs independent seeded coefficient and
+inverse-transform references across parity, dtype, and non-unit domains, with
+explicit DC/Nyquist checks and a mutation test. Random-feature evaluation tests
+assert shapes, seeds, tensor semantics, metrics, and ensemble separation
+directly. Fixed byte hashes remain only for semantic content-addressing,
+tamper behavior, mock metadata, and the explicitly versioned deterministic
+split contract. `docs/numerical_hash_inventory.md` and
+`tests/test_numerical_hash_inventory.py` mechanically classify every
+hard-coded SHA-256 literal in tests.
+
+**Residual caveat:** the current split policy uses CPU `torch.randperm`; its
+stored hash is part of the scientific split contract and the numerical
+environment includes the Torch version. A future backend-independent split
+requires an explicit policy/schema migration, not a silent golden update.
 
 ## Items not yet verified
 

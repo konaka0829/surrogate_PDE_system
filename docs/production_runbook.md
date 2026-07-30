@@ -36,7 +36,7 @@ pytest -q
 ./scripts/check.sh
 ```
 
-The current package version is `0.2.23`. Save the Git commit, dirty status,
+The current package version is `0.2.29`. Save the Git commit, dirty status,
 Python/package versions, host/CPU information, and the audit JSON with the
 production log. Do not change code, specifications, dependencies, or the
 Python environment between stages; those changes alter content identities.
@@ -79,11 +79,12 @@ Run and archive:
 python3 scripts/plan_main.py > production_plan_audit.json
 ```
 
-`pol-production-plan-audit-v2` strict-parses all three main validations, both
+`pol-production-plan-audit-v3` strict-parses all three main validations, both
 datasets, nine studies, the independent FNO baseline, and the cross-run
 report. It reports parse/plan status, the main marker, case/candidate/model
-upper bounds, readout and seed counts, dependency state, and expected output
-families. It does not build a validation or dataset, execute a study or
+upper bounds, inner ridge/map/lift/SVD operation counts, shape budgets,
+dependency state, and expected output families. It does not build a validation
+or dataset, execute a study or
 digital training run, resolve a missing dependency by running it, or write a
 repository artifact.
 
@@ -93,28 +94,54 @@ before production. Re-run the audit after every completed stage; dependency
 states should progress from `missing` to verified/completed in the order
 below.
 
-## Exact current plan counts
+## Exact current workload counts
 
 These counts come from strict parsing and pure case expansion, not from an
 executed main result.
 
-| Study | Cases | Candidate upper bound | Readouts/case | RF selection seeds/case | RF evaluation seeds/case |
-|---|---:|---:|---:|---:|---:|
-| `heat_readout_calibration` | 12 | 12 | 3 | 5 | 10 |
-| `surrogate_parameter_time_coordinate_search` | 2 | 120 | 3 | 5 | 10 |
-| `surrogate_parameter_time_landscape` | 3 | 75 | 3 | 5 | 10 |
-| `dynamic_feature_baseline_comparison` | 4 | 4 | 3 | 5 | 10 |
-| `readout_stability_noise` | 1 | 1 | 3 | 5 | 10 |
-| `learning_curve` | 6 | 6 | 3 | 5 | 10 |
-| `random_feature_seed_statistics` | 1 | 1 | 2 | 5 | 32 |
-| `observation_output_budget` | 40 | 40 | 3 | 5 | 10 |
-| `input_simulation_resolution` | 32 | 32 | 3 | 5 | 10 |
+| Study | Cases | Candidate trials | RF maps | Train/validation lifts | RF selection ridge fits | Lazy evaluation fits | Legacy eager total |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `heat_readout_calibration` | 12 | 12 | 1,080 | 2,160 | 6,480 | 120 | 6,600 |
+| `surrogate_parameter_time_coordinate_search` | 2 | 120 | 10,800 | 21,600 | 64,800 | 20 | 66,000 |
+| `surrogate_parameter_time_landscape` | 3 | 75 | 6,750 | 13,500 | 40,500 | 30 | 41,250 |
 
 The landscape's 75 candidates are the complete three-variant 5-by-5
-parameter/time grid. The budget and resolution counts are global-axis cases,
-not a second runner type. `random_feature_seed_statistics` declares 32
-independent evaluation realizations; prediction averaging remains a separate
-ensemble result.
+parameter/time grid. Its legacy eager total is
+`40,500 selection fits + 750 evaluation-member fits = 41,250`; the lazy
+lifecycle instead performs `40,500 + 30 = 40,530` fits. The three rows above
+are resolved without an upstream selection source. Until the landscape is
+completed and verified, the other six studies report
+`unresolved_selection_dependency` and `counts=null`; the audit deliberately
+does not invent workload values from placeholder feature conditions.
+
+The machine-readable formulas are:
+
+- candidate feature-state solves are bounded by declared candidate trials;
+- an affine readout contributes one fit per declared zeta and one SVD for each
+  zero zeta;
+- random-feature structures are
+  `widths × weight_scales × bias_scales`;
+- unique random maps are
+  `candidates × structures × selection_seeds`;
+- train/validation lifts count two tensor lifts per unique map;
+- selection ridge fits are
+  `candidates × structures × selection_seeds × zetas`;
+- lazy evaluation fits are evaluation seeds for the one selected candidate of
+  each case/random-feature readout;
+- the legacy eager comparison is evaluation seeds for every candidate;
+- zero-zeta evaluation SVDs are reported as an upper bound because the
+  validation-selected zeta is unknown at pure-plan time.
+
+Maximum lifted dimension, target dimension, canonical training count,
+convergence solves/comparisons, and declared noise-coordinate evaluations are
+stored alongside these counts. They are operation/shape budgets, not elapsed
+time estimates.
+
+Before any main execution stage, a human must archive and sign off the
+`workload` block from `production_plan_audit.json`, including available CPU
+memory, wall-time allocation, and storage capacity. Absence of that review is
+a stop condition. Re-run and review the audit whenever a dependency becomes
+resolved; do not copy numerical counts from an earlier unresolved plan.
 
 Each validation has 1,400 samples and three reference-resolution candidates.
 Burgers and reaction-diffusion each have three numerical-condition candidates;
