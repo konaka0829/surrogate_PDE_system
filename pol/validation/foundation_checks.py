@@ -237,6 +237,39 @@ def _decoder_checks(spec: ValidationSpec) -> dict[str, Any]:
     full_pass = algebraic_allclose(decoded, coeff, spec)
 
     reduced = spec.reduced_observation
+    kmax = (reduced.q - 1) // 2
+    if reduced.J < 2 or kmax < 1:
+        raise ValueError(
+            "fixed-decoder aliasing counterexample requires reduced J >= 2 "
+            "and reduced q >= 3"
+        )
+    reduced_bandwidth = fixed_fourier_decoder_bandwidth(
+        reduced.J,
+        reduced.q,
+    )
+    base_mode = kmax
+    if base_mode > reduced_bandwidth.observable_max_mode:
+        raise ValueError(
+            "fixed-decoder aliasing counterexample requires the base mode "
+            "to lie in the observable Fourier band"
+        )
+    alias_k = reduced.J + base_mode
+    alias_source_nx = max(
+        int(full.n_sur),
+        2 * int(alias_k) + 2,
+    )
+    if alias_source_nx % 2:
+        alias_source_nx += 1
+    if (
+        reduced.J > alias_source_nx
+        or base_mode >= alias_source_nx / 2
+        or alias_k >= alias_source_nx / 2
+    ):
+        raise ValueError(
+            "fixed-decoder aliasing source grid cannot represent the "
+            "synthetic base and high modes strictly below Nyquist"
+        )
+
     rcoeff = torch.randn((2, reduced.q), generator=generator, dtype=dtype)
     rfield = real_fourier_synthesis(rcoeff, full.n_sur, domain_length=L)
     rfeatures = observe_equispaced_periodic(
@@ -247,24 +280,35 @@ def _decoder_checks(spec: ValidationSpec) -> dict[str, Any]:
     )
     reduced_pass = algebraic_allclose(rdecoded, rcoeff, spec)
 
-    kmax = (reduced.q - 1) // 2
-    alias_k = reduced.J + max(1, kmax)
-    alias_pass = False
-    alias_error = float("nan")
-    if alias_k < full.n_sur / 2:
-        x = periodic_grid(full.n_sur, L, dtype=dtype)
-        base = 0.2 + torch.cos(2 * torch.pi * max(1, kmax) * x / L)
-        high = base + 0.4 * torch.cos(2 * torch.pi * alias_k * x / L)
-        truth = real_fourier_analysis(base.unsqueeze(0), reduced.q, domain_length=L)
-        aliased = decode_point_observation_to_real_fourier(
-            observe_equispaced_periodic(
-                high.unsqueeze(0), reduced.J, domain_length=L, l2_scale=True
-            ),
-            reduced.q,
+    x = periodic_grid(alias_source_nx, L, dtype=dtype)
+    base = 0.2 + torch.cos(2 * torch.pi * base_mode * x / L)
+    high = base + 0.4 * torch.cos(2 * torch.pi * alias_k * x / L)
+    truth = real_fourier_analysis(
+        base.unsqueeze(0),
+        reduced.q,
+        domain_length=L,
+    )
+    aliased = decode_point_observation_to_real_fourier(
+        observe_equispaced_periodic(
+            high.unsqueeze(0),
+            reduced.J,
             domain_length=L,
+            l2_scale=True,
+        ),
+        reduced.q,
+        domain_length=L,
+    )
+    alias_difference = (aliased - truth).abs().max()
+    if not (
+        bool(torch.isfinite(truth).all())
+        and bool(torch.isfinite(aliased).all())
+        and bool(torch.isfinite(alias_difference))
+    ):
+        raise ValueError(
+            "fixed-decoder aliasing counterexample produced a non-finite result"
         )
-        alias_error = float((aliased - truth).abs().max())
-        alias_pass = not algebraic_allclose(aliased, truth, spec)
+    alias_error = float(alias_difference)
+    alias_pass = not algebraic_allclose(aliased, truth, spec)
 
     zero_fill_J = 4
     zero_fill_q = 7
@@ -331,6 +375,9 @@ def _decoder_checks(spec: ValidationSpec) -> dict[str, Any]:
         },
         "aliasing_counterexample": {
             "status": "pass" if alias_pass else "fail",
+            "source_nx": alias_source_nx,
+            "observation_count": reduced.J,
+            "base_mode": base_mode,
             "high_mode": alias_k,
             "max_abs_difference": alias_error,
         },

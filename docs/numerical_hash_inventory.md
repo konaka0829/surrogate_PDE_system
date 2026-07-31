@@ -1,7 +1,7 @@
 # Numerical hash inventory
 
 This inventory classifies fixed hashes in `tests/` separately from runtime
-artifact verification. It applies to package `0.2.29`.
+artifact verification. It applies to package `0.2.30`.
 
 ## Removed backend-numerical goldens
 

@@ -116,7 +116,7 @@ def test_device_resolution_never_consults_cuda_availability(
 def test_environment_fingerprint_separates_policy_from_cuda_build_metadata() -> None:
     fingerprint = numerical_environment_fingerprint()
     assert fingerprint["schema_version"] == "pol-numerical-environment-v2"
-    assert __version__ == "0.2.29"
+    assert __version__ == "0.2.30"
     assert fingerprint["pol_version"] == __version__
     assert {
         key: fingerprint[key] for key in execution_device_policy()

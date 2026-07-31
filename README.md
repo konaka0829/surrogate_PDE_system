@@ -610,7 +610,7 @@ the validation, selection, frozen, and test copies. `run_summary.json` records
 the selected direct-decoder diagnostic count, zero-fill count, and any-zero-
 fill flag.
 
-The active package version is `0.2.29`. Study configurations through
+The active package version is `0.2.30`. Study configurations through
 `pol-study-v6` remain accepted. Newly written study artifacts use
 `pol-study-plan-v4`, run identity `v15`, selection record `v9`, frozen model
 archive and evaluation plan `v10`, result rows `v3`, and run manifest/summary

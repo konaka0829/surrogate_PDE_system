@@ -2,7 +2,7 @@
 
 This inventory separates the active implementation from historical
 transitions and work that has not yet been executed or verified. It is a
-characterization of package `0.2.29`, not a claim that checked-in main plans
+characterization of package `0.2.30`, not a claim that checked-in main plans
 have produced scientific results.
 
 ## Current active implementation
@@ -11,7 +11,7 @@ The active write-side contracts are:
 
 | Artifact responsibility | Active contract |
 |---|---|
-| package/environment | package `0.2.29`; `pol-numerical-environment-v2` |
+| package/environment | package `0.2.30`; `pol-numerical-environment-v2` |
 | validation | config through `pol-validation-v6`; identity/certificate `v12`; foundation contract `v8` |
 | dataset | `pol-dataset-v3`; binding proof `v7`; identity/metadata/archive/resolved families `v5` |
 | study plan and identity | `pol-study-plan-v4`; run identity `v15`; workload plan/case `v1` |
@@ -24,7 +24,7 @@ Older schemas accepted by read-only selection-source verification are
 migration inputs, not active-write versions.
 
 Maintenance validation for this release completed with Python 3 compilation,
-646 tests, `scripts/check.sh`, the full smoke workflow, the read-only main plan
+649 tests, `scripts/check.sh`, the full smoke workflow, the read-only main plan
 audit, and wheel construction passing. The smoke workflow exercised all three
 validations, both datasets, nine studies, the optional FNO adapter, and the
 four-source report. This is execution-path evidence only: no main profile was
@@ -67,7 +67,9 @@ flow. A passing certificate currently covers:
 - an explicit valid case with `n_tar <= J`, demonstrating that the dimensions
   are independent;
 - fixed Fourier decoding for full and reduced band-limited observations, plus
-  an aliasing counterexample;
+  an aliasing counterexample whose synthetic source grid is constructed
+  independently of configured `n_sur` at sufficient resolution to keep its
+  high mode strictly below Nyquist;
 - a profile-independent matched Model 1 pipeline suite that passes the actual
   finite restriction, feature encoding, registered PDE evolution, point
   observation, and fixed decoder for heat, split-step/ETDRK4 Burgers, and
@@ -539,7 +541,7 @@ results and do not receive placeholder seed uncertainty.
 - Validation identity/certificate remain `v12`, the foundation contract
   remains `v8`, dataset binding proofs remain `v7`, and the field quadrature
   and matched Model 1 checks remain independently versioned. The numerical
-  environment is `v2` and records active package version `0.2.29`.
+  environment is `v2` and records active package version `0.2.30`.
 - Plot-only regeneration requires an existing verified run and is
   transactional.
 - Scientific JSON and CLI overrides reject non-finite constants at parse/model
@@ -572,6 +574,7 @@ artifacts. It does not redefine the active versions above.
 | `0.2.27` | tensor-cross-checked real-scalar fairness parameter accounting |
 | `0.2.28` | periodic FNO coordinate policy: default `none`, optional `periodic_sin_cos`, rejected legacy ramp |
 | `0.2.29` | selected-only random-feature evaluation-member materialization and workload plan/audit v3 |
+| `0.2.30` | fixed-decoder aliasing characterization uses an independently resolved finite synthetic source grid |
 
 The portable numerical-regression audit changed tests only; it did not change
 package, artifact, or scientific schema versions.

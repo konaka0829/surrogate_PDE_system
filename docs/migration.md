@@ -118,7 +118,7 @@ with a source study spec, source variant/readout, and allowlisted import paths.
 `pol-study-v2` runs do not contain this provenance and are rejected rather than
 silently accepted as selection-bound results.
 
-Active package `0.2.29` writes study plan `v4`, identity `v15`, selection `v9`,
+Active package `0.2.30` writes study plan `v4`, identity `v15`, selection `v9`,
 frozen archive/plan `v10`, result row `v3`, and manifest/summary `v16`.
 Read-only compatibility with older completed selection sources is migration
 support, not an active-write version. Scientific JSON is finite-only, artifact

@@ -36,7 +36,7 @@ pytest -q
 ./scripts/check.sh
 ```
 
-The current package version is `0.2.29`. Save the Git commit, dirty status,
+The current package version is `0.2.30`. Save the Git commit, dirty status,
 Python/package versions, host/CPU information, and the audit JSON with the
 production log. Do not change code, specifications, dependencies, or the
 Python environment between stages; those changes alter content identities.

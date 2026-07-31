@@ -9,6 +9,7 @@ import torch
 import pytest
 
 from pol.config.loader import load_dataset_spec, load_validation_spec
+from pol.config.models import InterfaceDimensionsSpec, ReducedObservationSpec
 from pol.data.dataset import ensure_dataset, load_dataset
 from pol.data.finite import build_feature_initial_state, derive_finite_view
 from pol.data.initial_conditions import generate_grf_archive
@@ -18,6 +19,7 @@ from pol.numerics.initial_conditions import GRF_SAMPLER_SEMANTICS
 from pol.validation.model1_consistency import (
     MODEL1_CONSISTENCY_CHECK_SCHEMA_VERSION,
 )
+from pol.validation.foundation_checks import _decoder_checks
 from pol.validation.quadrature import (
     FIELD_QUADRATURE_CHECK_SCHEMA_VERSION,
     run_field_quadrature_check,
@@ -32,6 +34,17 @@ from tests.helpers import write_json, write_tiny_heat_stack, write_tiny_stack
 
 def _read_json(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _assert_all_floats_finite(value: object) -> None:
+    if isinstance(value, float):
+        assert math.isfinite(value)
+    elif isinstance(value, dict):
+        for nested in value.values():
+            _assert_all_floats_finite(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            _assert_all_floats_finite(nested)
 
 
 def _refresh_artifact_record(root: Path, relative_path: str) -> None:
@@ -133,7 +146,22 @@ def test_foundation_validation_publishes_passing_certificate(tmp_path: Path) -> 
     outcome = ensure_validation(spec)
     assert outcome.certificate["status"] == "pass"
     checks = json.loads((outcome.reference.path / "checks.json").read_text(encoding="utf-8"))
+    json.dumps(checks, allow_nan=False)
+    json.dumps(outcome.certificate, allow_nan=False)
+    _assert_all_floats_finite(checks)
+    _assert_all_floats_finite(outcome.certificate)
     assert checks["finite_input_interface"]["dimension_independence"]["n_tar_le_J_exercised"]
+    aliasing = checks["fixed_decoder"]["aliasing_counterexample"]
+    assert aliasing["status"] == "pass"
+    assert set(aliasing) >= {
+        "status",
+        "source_nx",
+        "observation_count",
+        "base_mode",
+        "high_mode",
+        "max_abs_difference",
+    }
+    assert math.isfinite(aliasing["max_abs_difference"])
     zero_fill = checks["fixed_decoder"]["zero_fill_characterization"]
     assert zero_fill["status"] == "pass"
     assert zero_fill["requested_q"] == 7
@@ -228,6 +256,82 @@ def test_foundation_validation_publishes_passing_certificate(tmp_path: Path) -> 
         "80e69dd30b1caa4acae41729789c90449c8749292a6ceb85680949656dd503e1"
     )
     assert (outcome.reference.path / "master_initial_conditions.pt").is_file()
+
+
+def test_decoder_aliasing_counterexample_handles_main_equivalent_dimensions() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    smoke = load_validation_spec(
+        repo_root / "configs/validation/foundation_smoke.json",
+        repo_root=repo_root,
+    )
+    spec = smoke.model_copy(
+        update={
+            "full_interface": InterfaceDimensionsSpec(
+                n_tar=512,
+                n_sur=512,
+                J=512,
+                q=257,
+            ),
+            "reduced_observation": ReducedObservationSpec(
+                J=256,
+                q=129,
+            ),
+        }
+    )
+
+    checks = _decoder_checks(spec)
+    aliasing = checks["aliasing_counterexample"]
+
+    assert checks["status"] == "pass"
+    assert aliasing["status"] == "pass"
+    assert aliasing["source_nx"] == 642
+    assert aliasing["observation_count"] == 256
+    assert aliasing["base_mode"] == 64
+    assert aliasing["high_mode"] == 320
+    assert math.isfinite(aliasing["max_abs_difference"])
+    json.dumps(checks, allow_nan=False)
+
+
+def test_decoder_aliasing_counterexample_preserves_smoke_dimensions() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = load_validation_spec(
+        repo_root / "configs/validation/foundation_smoke.json",
+        repo_root=repo_root,
+    )
+
+    checks = _decoder_checks(spec)
+    aliasing = checks["aliasing_counterexample"]
+
+    assert checks["status"] == "pass"
+    assert aliasing["status"] == "pass"
+    assert aliasing["source_nx"] == 64
+    assert aliasing["observation_count"] == 16
+    assert aliasing["base_mode"] == 4
+    assert aliasing["high_mode"] == 20
+    assert math.isfinite(aliasing["max_abs_difference"])
+    json.dumps(checks, allow_nan=False)
+
+
+def test_decoder_aliasing_counterexample_rejects_missing_observable_base_mode() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    smoke = load_validation_spec(
+        repo_root / "configs/validation/foundation_smoke.json",
+        repo_root=repo_root,
+    )
+    spec = smoke.model_copy(
+        update={
+            "reduced_observation": ReducedObservationSpec(
+                J=16,
+                q=1,
+            )
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="aliasing counterexample requires",
+    ):
+        _decoder_checks(spec)
 
 
 def test_common_foundation_checks_execute_once_for_each_target(

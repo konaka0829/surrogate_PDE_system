@@ -354,4 +354,4 @@ def test_all_checked_in_scientific_configs_strict_parse() -> None:
 
 def test_valid_model_dumps_are_unchanged_and_version_is_patched() -> None:
     assert DomainSpec(length=1.0).model_dump(mode="json") == {"length": 1.0}
-    assert pol.__version__ == "0.2.29"
+    assert pol.__version__ == "0.2.30"
